@@ -1,0 +1,82 @@
+[
+  {
+    "id": "netplay-slim-shirt",
+    "name": "Men Slim Fit Cotton Formal Shirt",
+    "brand": "NETPLAY",
+    "category": "Men's Shirts",
+    "price": 1299,
+    "size_chart": {
+      "S": {"chest": 38, "length": 27},
+      "M": {"chest": 40, "length": 28},
+      "L": {"chest": 42, "length": 29},
+      "XL": {"chest": 44, "length": 30}
+    },
+    "review_snippets": [
+      "Looks sharp but runs small — I had to size up from my usual M to L.",
+      "Slim fit is quite snug across the chest. Fabric quality is decent for the price.",
+      "Colour matches the photo. Sleeves on M were a bit short on me."
+    ],
+    "saved_days_ago": 5,
+    "stock_status": "low_stock"
+  },
+  {
+    "id": "aurelia-printed-kurta",
+    "name": "Women Printed Straight Cotton Kurta",
+    "brand": "AURELIA",
+    "category": "Women's Kurtas",
+    "price": 1499,
+    "size_chart": {
+      "S": {"chest": 36, "length": 44},
+      "M": {"chest": 38, "length": 45},
+      "L": {"chest": 40, "length": 46},
+      "XL": {"chest": 42, "length": 47}
+    },
+    "review_snippets": [
+      "True to size. I wear M everywhere and M was a perfect fit.",
+      "Soft cotton, colours didn't fade after a wash. Length is as described.",
+      "Comfortable for office — not clingy, not oversized."
+    ],
+    "saved_days_ago": 60,
+    "stock_status": "in_stock"
+  },
+  {
+    "id": "dnmx-skinny-jeans",
+    "name": "Women Mid-Rise Skinny Fit Jeans",
+    "brand": "DNMX",
+    "category": "Women's Jeans",
+    "price": 1799,
+    "size_chart": {
+      "26": {"waist": 26, "length": 32},
+      "28": {"waist": 28, "length": 32},
+      "30": {"waist": 30, "length": 32},
+      "32": {"waist": 32, "length": 32}
+    },
+    "review_snippets": [
+      "Runs small in the waist — I usually wear 28 but needed 30.",
+      "True to size for me. Stretch is good, didn't gap at the back.",
+      "Nice wash but the thigh is tight. Sizing feels inconsistent across batches."
+    ],
+    "saved_days_ago": 150,
+    "stock_status": "in_stock"
+  },
+  {
+    "id": "and-aline-dress",
+    "name": "Women Solid A-Line Midi Dress",
+    "brand": "AND",
+    "category": "Women's Dresses",
+    "price": 2499,
+    "size_chart": {
+      "S": {"chest": 34, "waist": 28, "length": 46},
+      "M": {"chest": 36, "waist": 30, "length": 47},
+      "L": {"chest": 38, "waist": 32, "length": 48},
+      "XL": {"chest": 40, "waist": 34, "length": 49}
+    },
+    "review_snippets": [
+      "True to size. Zipper sits well; I didn't need to size up.",
+      "Lining is good quality. Waist nips in exactly where it should in M.",
+      "Wore it to a work dinner — fabric doesn't crease much in a cab."
+    ],
+    "saved_days_ago": 12,
+    "stock_status": "low_stock"
+  }
+]
