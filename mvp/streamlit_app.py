@@ -195,6 +195,12 @@ PROTO_BANNER = (
     "signals, but cannot guarantee fit. Simulated stock is not live inventory. "
     "No discounts or coupons."
 )
+ANALYSE_PROTOTYPE_CALLOUT = (
+    "Prototype testing mode: In an integrated AJIO experience, product details, "
+    "size charts and reviews would be filled automatically from the selected "
+    "wishlist item. Manual entry is included here only to test the assistant "
+    "with products outside the sample wishlist."
+)
 FIT_NOTE = (
     "Supports your decision based on provided data, but cannot guarantee "
     "actual fit."
@@ -2120,6 +2126,14 @@ h1, h2, h3 { font-family: Manrope, sans-serif !important; }
 
 .wd-callout { background: #f6f3f2; border-radius: 8px; padding: 1rem; display: flex;
   gap: 0.75rem; align-items: flex-start; margin: 0.5rem 0 1rem; }
+.wd-info-callout {
+  background: #eaf1f8; border-radius: 8px; padding: 0.85rem 1rem;
+  display: flex; gap: 0.75rem; align-items: flex-start;
+  margin: 0.15rem 0 1rem; border-left: 3px solid #366091;
+}
+.wd-info-callout p {
+  margin: 0; color: #315C8C; font-size: 14px; line-height: 22px;
+}
 .wd-policy-kicker {
   font-family: Inter, sans-serif; font-size: 11px; font-weight: 600;
   letter-spacing: 0.08em; text-transform: uppercase; color: #6c0029;
@@ -3225,6 +3239,44 @@ def restore_custom_form(payload: dict) -> None:
         st.session_state[key] = value
 
 
+def example_analyse_payload() -> dict:
+    """Realistic prototype payload for the analyse form. Not a live catalogue item."""
+    return {
+        "product_name": "Women Solid A-Line Midi Dress",
+        "brand": "AND",
+        "category": "Dresses & Jumpsuits",
+        "price": "2499",
+        "size_chart": (
+            "S: chest 34, waist 28, length 46\n"
+            "M: chest 36, waist 30, length 47\n"
+            "L: chest 38, waist 32, length 48\n"
+            "XL: chest 40, waist 34, length 49"
+        ),
+        "reviews": (
+            "True to size. Zipper sits well; I didn't need to size up.\n"
+            "Lining is good quality. Waist nips in exactly where it should in M."
+        ),
+        "availability": None,
+        "usual_size": "M",
+        "chest": 36.0,
+        "waist": 30.0,
+        "why_saved": (
+            "Need a midi for a cousin's wedding next week; already pictured "
+            "wearing this."
+        ),
+        "occasion_for": "Yes",
+        "occasion_timing": "9 days",
+        "unresolved_questions": None,
+        "comparison_status": "not_comparing",
+        "extra_context": None,
+    }
+
+
+def load_example_analyse_form() -> None:
+    """Prefill analyse widgets from the example payload. Does not submit."""
+    restore_custom_form(example_analyse_payload())
+
+
 def _ordered_items(items: list[dict]) -> list[dict]:
     rank = {key: i for i, key in enumerate(WISHLIST_ORDER)}
     return sorted(items, key=lambda x: rank.get(str(x.get("id") or ""), 99))
@@ -3536,17 +3588,37 @@ def render_analyse_page(api_key: str | None) -> None:
         f"""
 <div class="wd-kicker">{icon("fact_check", 14)} Structured Evaluation</div>
 <h1 class="wd-h1 lg">Analyse a wishlisted item</h1>
-<p class="wd-lead">Add the information you already have. The assistant will not invent missing product details.</p>
         """
     )
+    md(
+        f"""
+<div class="wd-info-callout">
+  {icon("info", 18)}
+  <p>{html.escape(ANALYSE_PROTOTYPE_CALLOUT)}</p>
+</div>
+        """
+    )
+    md(
+        "<p class=\"wd-lead\">Add the information you already have. "
+        "The assistant will not invent missing product details.</p>"
+    )
+    load_col, _ = st.columns([1, 2])
+    with load_col:
+        if st.button(
+            "Load an example item",
+            type="secondary",
+            use_container_width=True,
+            key=f"load_example_{nonce}",
+        ):
+            load_example_analyse_form()
     md(
         f"""
 <div class="wd-card xl" style="margin-bottom:0.35rem">
   <div class="wd-section-head">
     <div class="wd-num">1</div>
     <div>
-      <div class="wd-name" style="margin:0">Product Information</div>
-      <p class="wd-muted" style="margin:0">Archival specs, manufacturer data, and verified customer notes</p>
+      <div class="wd-name" style="margin:0">Product evidence — auto-filled in the integrated experience</div>
+      <p class="wd-muted" style="margin:0">Enter or load details here to test the assistant</p>
     </div>
   </div>
 </div>
@@ -3554,7 +3626,7 @@ def render_analyse_page(api_key: str | None) -> None:
     )
     with st.form(f"analyse_form_{nonce}", clear_on_submit=False):
         prod_name = st.text_input(
-            "Product Name *",
+            "Product Name — required",
             placeholder="e.g. Cotton Relaxed Cuban Collar Shirt",
             key=f"ca_prod_name_{nonce}",
         )
@@ -3567,31 +3639,31 @@ def render_analyse_page(api_key: str | None) -> None:
             )
         with c2:
             category = st.selectbox(
-                "Category *",
+                "Category — required",
                 ANALYSE_CATEGORIES,
                 index=None,
                 placeholder="Select category",
                 key=f"ca_category_{nonce}",
             )
         price = st.text_input(
-            "Current Price (optional)",
+            "Current Price — optional",
             placeholder="1899",
             key=f"ca_price_{nonce}",
         )
         size_chart = st.text_area(
-            "Size Chart / Exact Specs",
+            "Size Chart — optional, improves confidence",
             placeholder="Paste measurement table or key sizing specs e.g. M: Chest 38, L: Chest 40...",
             height=80,
             key=f"ca_size_chart_{nonce}",
         )
         reviews = st.text_area(
-            "Review Snippets & User Feedback",
+            "Review Snippets — optional, improves confidence",
             placeholder="Paste relevant review comments mentioning fit, cut, fabric, or sizing...",
             height=80,
             key=f"ca_reviews_{nonce}",
         )
         availability = st.text_input(
-            "Availability Notes (optional)",
+            "Availability Notes — optional",
             placeholder="e.g. Only size L was listed in stock this morning",
             key=f"ca_availability_{nonce}",
         )
@@ -3605,7 +3677,7 @@ def render_analyse_page(api_key: str | None) -> None:
         s1, s2, s3 = st.columns(3)
         with s1:
             usual = st.selectbox(
-                "Usual Size *",
+                "Usual Size — required",
                 LETTER_SIZES,
                 index=None,
                 placeholder="Size",
@@ -3613,18 +3685,20 @@ def render_analyse_page(api_key: str | None) -> None:
             )
         with s2:
             chest_in = st.number_input(
-                "Chest / Bust (in)",
+                "Chest/Bust — optional, improves confidence",
                 min_value=0.0,
                 max_value=60.0,
                 step=0.5,
+                help="Inches",
                 key=f"ca_chest_{nonce}",
             )
         with s3:
             waist_in = st.number_input(
-                "Waist (in)",
+                "Waist — optional, improves confidence",
                 min_value=0.0,
                 max_value=60.0,
                 step=0.5,
+                help="Inches",
                 key=f"ca_waist_{nonce}",
             )
         save_reason = st.text_area(

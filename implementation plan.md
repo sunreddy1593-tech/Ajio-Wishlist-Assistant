@@ -44,7 +44,7 @@ This is the **as-built** plan for the standalone Streamlit MVP. It is not a disc
 | Key from secrets only | `get_groq_api_key()` reads `st.secrets["GROQ_API_KEY"]`; environment variables are ignored |
 | Save age is not a buy reason | `saved_days_ago` is display/evidence only; not in the Ready-to-buy condition |
 | Simulated stock is not urgency | `stock_status` never changes `decision_status`; low stock is supporting context only |
-| Honest simulation | Sample products, reviews, availability, and photos are labelled fictional / simulated |
+| Honest simulation | Sample products, reviews, availability, and photos are labelled fictional / simulated; Analyse an Item states prototype testing mode; **Load an example item** is a hardcoded payload, not a catalogue |
 | After save, before buy | No login, DB, live inventory API, payments, or notification backend |
 
 ---
@@ -77,7 +77,7 @@ Layout *inside* `streamlit_app.py`:
 6. Live Groq call + schema check (`GroqParseError` vs missing information)
 7. Rule fallback (`compute_custom_analysis_fallback`)
 8. Shopper evidence (`format_decision_evidence`) + custom evidence (`custom_evidence_lines`) + native measurement rows
-9. Retry / edit recovery (`retry_saved_analysis`, `edit_saved_analysis`) + form state (`_custom_form_values`, `_ensure_custom_form_state`, `restore_custom_form`)
+9. Retry / edit recovery (`retry_saved_analysis`, `edit_saved_analysis`) + form state (`_custom_form_values`, `_ensure_custom_form_state`, `restore_custom_form`, `example_analyse_payload`, `load_example_analyse_form`)
 10. Same-tab nav (`nav_to`, `nav_button`)
 11. Views: wishlist, item detail, analyse form, live result
 12. `main()` — query-param routing
@@ -154,7 +154,7 @@ Replaces Buy now / Wait. Returns `decision_status`, `decision_reason`, `next_ste
 - Per item: metadata, simulated stock chip (“Simulated stock: … (not live)”), reason saved, two panels, fit note, buttons to detail.
 - Item detail: **Back to wishlist**, save context, both panels, native measurement evidence (Your profile / Closest chart size / Suggested size — no raw HTML tags), simulated review snippets, shopper-facing “Based on” list via `format_decision_evidence`.
 - Expander: how the recommendation was generated / what is simulated.
-- Analyse form: **one** `st.form` (product block + decision-context block); submit immediately builds `custom_analysis_payload`. Availability caption that notes are not live inventory. Secret-missing warning when the key is absent.
+- Analyse form: prototype testing callout immediately below the heading; **Load an example item** (secondary, *outside* and *above* the form) prefills a hardcoded example via `restore_custom_form` and does not submit; **one** `st.form` (**Product evidence — auto-filled in the integrated experience** + decision-context block) with required / optional / “improves confidence” field labels; submit (**Analyse this item**, primary) immediately builds `custom_analysis_payload`. Availability caption that notes are not live inventory. Secret-missing warning when the key is absent.
 - Live result: same two panels, with evidence lines that quote the submitted values; or Needs more information listing **only actually missing** fields; or a processing error; or a labelled rule fallback (never silently shown as live AI).
 - Every analyse-form input **and** every button on the result screens has an explicit `key`. Input keys are suffixed with the analyse nonce (`ca_chest_{nonce}`), which is what Clear form increments.
 
@@ -194,6 +194,12 @@ Decorative sample photos are in the UI. They are not a live catalogue. Layout ch
 3. `_custom_form_values` converts payload fields to widget shapes: `occasion_for` → the radio's `"Yes"` / `"No"`, `comparison_status` → `"Yes"` / `"No"`, `unresolved_questions` → a list filtered to `UNCERTAINTY_CHIPS`, `chest` / `waist` → floats. Category and usual size are written only when still valid options.
 4. `_ensure_custom_form_state` (analyse page, first line) seeds only **missing** keys, so a rerun mid-typing does not revert what the shopper is entering. `restore_custom_form` **overwrites** — that asymmetry is deliberate.
 
+**Load an example item** (secondary, above the form, not a submit):
+
+1. `load_example_analyse_form()` calls `restore_custom_form(example_analyse_payload())`.
+2. The button is outside `st.form` and rendered *before* the inputs, so the write lands on this run.
+3. It does not set `custom_analysis_payload` or call Groq. Submit still builds the payload from the widgets.
+
 **Evidence copy on the live result** — `custom_evidence_lines(rows, result, payload)`:
 
 1. Classify each cited label into the supplied value it refers to (chart, reviews, chest, waist, usual size, occasion, price, availability).
@@ -208,7 +214,7 @@ Decorative sample photos are in the UI. They are not a live catalogue. Layout ch
 - `mvp/requirements.txt`: `streamlit`, `groq`
 - `mvp/README.md`: local run, secrets, Community Cloud
 - Root `.gitignore`: `.streamlit/secrets.toml`, `.env`, venv, `__pycache__`
-- `tests/test_engines.py`: fit, decision, shopper copy, live normalizer, demo-without-key, no-discount, custom-analysis flow, Groq adapter, rule fallback, evidence formatter, measurement evidence, navigation, the six deployment-failure cases, custom-evidence copy (`CustomEvidenceTests`), and a ten-item regression checklist (`CustomAnalysisRegressionTests`)
+- `tests/test_engines.py`: fit, decision, shopper copy, live normalizer, demo-without-key, no-discount, custom-analysis flow, Groq adapter, rule fallback, evidence formatter, measurement evidence, navigation, the six deployment-failure cases, custom-evidence copy (`CustomEvidenceTests`), a ten-item regression checklist (`CustomAnalysisRegressionTests`), and analyse-page copy / example-loader checks (callout text, required vs optional labels, `load_example_analyse_form` prefills without submitting, example payload validates, Load button sits outside the form)
 - `CustomAnalysisRegressionTests` pins, one test per item: strict/fully-required/closed response schema (asserted on the captured request, not only the constant), valid JSON passing validation, missing response fields → `processing_error`, invalid enums → `processing_error`, Groq failure → `service_error`, a valid payload never producing `validation_error`, retry using the exact stored payload object, retry not rebuilding from blank widgets (`build_custom_analysis_payload` asserted uncalled), edit restoring chest / waist / usual size / chart / reviews / save reason / timing, and chest 40 surviving a retry followed by an edit
 
 ---
@@ -260,7 +266,8 @@ The older `buy_or_wait` / `info_to_check` contract is not what the prompt asks f
 - **Internal keys stay in Python.** Shopper lists go through `format_decision_evidence` (`comparison_status: comparing` → “You are comparing another shortlisted product.”), or `custom_evidence_lines` on Analyse an Item.
 - **Widget keys are nonce-suffixed, not flat.** `ca_chest_{nonce}`, never `custom_chest`. Clear form works by incrementing the nonce; a flat key would leave the old value on screen. Restoration reads the nonce from session state.
 - **Restore overwrites, seeding does not.** Reverting `restore_custom_form` to “only fill missing keys” reintroduces the original bug: Streamlit drops the form widgets while the shopper is on the result page, the page re-seeds chest to `0.0`, and the submitted measurement is lost.
-- **Restore before the widgets exist.** Writing widget state after `st.form` has built the inputs has no effect on that run. Restoration belongs in the button handler, before the rerun.
+- **Restore before the widgets exist.** Writing widget state after `st.form` has built the inputs has no effect on that run. Restoration belongs in a button handler that runs before the form: Edit my information (before the rerun) and **Load an example item** (same run, button placed above the form).
+- **Load an example item is not a submit and not an integration.** It only writes widget keys from `example_analyse_payload()`. Do not scrape, fetch a URL, or call AJIO. Do not set `custom_analysis_payload` until the shopper presses **Analyse this item**.
 - **A retry is not a resubmit.** Never rebuild the payload from the form on retry — the widgets may already be blank. Re-send the stored `custom_analysis_payload`.
 - **Evidence must not out-claim the payload.** If the model cites a size chart that was never pasted, drop the line. Do not paraphrase it into something that sounds supplied.
 - **Internal hops are buttons.** Markdown/HTML query-string links open a new Streamlit session in a new tab.
@@ -313,6 +320,10 @@ The older `buy_or_wait` / `info_to_check` contract is not what the prompt asks f
 | L14 | “Based on” lines quote submitted values (*Your chest measurement: 40 inches*, *Size M chart measurement: 40 inches*, *The item is needed in seven days*) rather than labels (*chest*, *size chart*, *occasion*) |
 | L15 | Submit with reviews but no chart: no bullet claims chart evidence |
 | L16 | No bullet shows an internal field name, a `snake_case:` prefix, or raw JSON |
+| L17 | Callout immediately below the heading states prototype testing mode and that manual entry is only for products outside the sample wishlist |
+| L18 | Product block is titled **Product evidence — auto-filled in the integrated experience**; Product Name / Category / Usual Size are labelled required; Size Chart, Review Snippets, Chest/Bust, and Waist are labelled optional, improves confidence; Current Price and Availability Notes are labelled optional |
+| L19 | **Load an example item** is a secondary button outside the form; it prefills product, size chart, two reviews, size profile, save reason, and occasion timing; it does not submit or call an API |
+| L20 | **Analyse this item** remains the primary form submit |
 
 ### Automated suite
 
@@ -320,7 +331,7 @@ From the repository root: `python -m unittest tests.test_engines`
 
 Covers fit confidence (including M + runs-small → L is Medium), next-action constraints, no-discount copy, custom-analysis flow, Groq adapter, rule fallback, evidence formatter, measurement rendering, same-tab nav helpers, the six deployment-failure cases in `DeploymentFailureTests`, custom-evidence copy in `CustomEvidenceTests`, and the ten-item `CustomAnalysisRegressionTests` checklist.
 
-Two structural tests parse `mvp/streamlit_app.py` rather than run it: one asserts every analyse-form input has an explicit key that `restore_custom_form` writes, the other that the page seeds form state before building any widget and never calls restore mid-render.
+Two structural tests parse `mvp/streamlit_app.py` rather than run it: one asserts every analyse-form input has an explicit key that `restore_custom_form` writes, the other that the page seeds form state before building any widget and never calls restore mid-render. Further tests pin the prototype callout copy, the required/optional field labels, that **Load an example item** sits outside the form while **Analyse this item** remains the submit, and that `load_example_analyse_form` writes widget keys without storing a submitted payload.
 
 ---
 
@@ -346,6 +357,7 @@ Two structural tests parse `mvp/streamlit_app.py` rather than run it: one assert
 - [x] Simulated stock never independently creates urgency
 - [x] No discounts in UI, rules, or prompt
 - [x] Sample/simulated data is labelled
+- [x] Analyse an Item states prototype testing mode; **Load an example item** prefills a hardcoded example without scraping or a live catalogue
 - [x] `python -m unittest tests.test_engines` covers the engines, the six deployment failures, and the ten custom-analysis regressions
 - [x] README covers local run and Streamlit Community Cloud
 - [x] No login, database, or notification backend

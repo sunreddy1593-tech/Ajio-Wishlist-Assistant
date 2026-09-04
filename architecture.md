@@ -44,7 +44,7 @@ A later production system could add other barriers (live inventory, price compar
 5. **Simulated stock never independently creates urgency.** Sample `stock_status` may appear as labelled supporting context. It is never live inventory and never the sole — or independent — reason to buy.
 6. **Demo never depends on a model.** Seeded JSON + deterministic rules. Missing `GROQ_API_KEY` must not crash Sample Wishlist.
 7. **Live is one round-trip when a key exists.** Analyse an Item uses a single Groq chat call (`messages=[{system},{user}]`), JSON in, two panels out. No streaming, no tools, no chain. If the key is missing or Groq fails, a **labelled rule-based fallback** uses the submitted payload — it is not presented as an LLM result.
-8. **Honesty about simulation.** Sample products, reviews, charts, availability, and product photos are prototype data and are labelled as such.
+8. **Honesty about simulation.** Sample products, reviews, charts, availability, and product photos are prototype data and are labelled as such. Analyse an Item is labelled prototype testing mode; **Load an example item** is a hardcoded payload, not a live catalogue.
 9. **Submitted fields are never treated as missing.** Custom analysis validates the saved form payload. Needs more information lists only fields that validation confirmed are absent. API and JSON failures are not converted into missing-information copy.
 10. **Shopper-facing copy.** Internal keys (`comparison_status`, `intent_state`, …) stay in Python. The UI shows translated sentences. Measurement evidence is native Streamlit, not raw HTML tags.
 11. **Same-tab navigation.** In-app views use Streamlit buttons that set `st.query_params` and `st.rerun()`. Markdown / HTML anchors are not used for internal nav (Streamlit would open a new tab).
@@ -85,7 +85,7 @@ Shopper already saved an item
 | --- | --- |
 | `view=wishlist` | Four fictional sample saves; size profile; health strip; two panels each |
 | `view=detail&item=<id>` | Evidence page for one sample item (chart, simulated reviews, decision evidence) |
-| `view=analyse` | Form to paste a custom item (one `st.form`; submit builds the payload immediately) |
+| `view=analyse` | Form to enter a custom item (prototype callout; **Load an example item** prefills widgets; one `st.form`; submit builds the payload immediately) |
 | `view=live_result` | Two-panel result from Groq, a labelled rule fallback, a parse error, or genuine Needs more information |
 
 ---
@@ -132,7 +132,8 @@ Usual S–XXL         │       ▼                                      │
                     + item detail (evidence)
                             ▲
                     ┌───────┴─ Analyse an Item (optional) ─────────┐
-Paste: product,     │  Form submit → session payload → validate     │
+Enter or load an    │  Load example prefills widgets (no submit)   │
+example: product,   │  Form submit → session payload → validate     │
 chart, reviews,     │  Missing fields only if validation says so   │
 size, occasion,     │  Key present: one Groq call (gpt-oss-120b)   │
 comparison, gaps    │  No key / Groq HTTP fail: labelled rule      │
@@ -155,12 +156,12 @@ comparison, gaps    │  No key / Groq HTTP fail: labelled rule      │
 | **Rule fallback** | Deterministic `compute_fit` / `compute_next_action` on the submitted payload when Groq is unavailable. Label: *Rule-based fallback — live AI analysis unavailable.* `is_live=False` even after item identity is copied onto the result |
 | **Evidence formatter** | `format_decision_evidence` translates internal engine keys before any shopper-facing list (wishlist + detail) |
 | **Custom evidence formatter** | `custom_evidence_lines` rewrites each cited label as a sentence quoting the supplied value — chart row for the suggested size, body measurements, review signals, usual size, occasion timing, price, availability. Drops a label when the value is absent |
-| **Form-state restore** | `_custom_form_values` maps a payload onto the analyse widget keys. `_ensure_custom_form_state` seeds only blanks on a rerun; `restore_custom_form` overwrites, for the return trip from the result page |
+| **Form-state restore** | `_custom_form_values` maps a payload onto the analyse widget keys. `_ensure_custom_form_state` seeds only blanks on a rerun; `restore_custom_form` overwrites, for Edit my information and for **Load an example item** (`load_example_analyse_form` → `example_analyse_payload`) |
 | **Panel renderer** | Fit + next-action panels on wishlist cards, detail, and live result |
 
 Session state is ephemeral (size widgets, analyse form nonce, `custom_analysis_payload` / result). Navigation does not wipe the size profile or the saved analyse payload. Nothing is persisted to disk.
 
-Every analyse-form widget carries an explicit key suffixed with the analyse nonce (`ca_chest_{nonce}`, `ca_reviews_{nonce}`, …). The nonce is what **Clear form** and **Analyse another item** increment to blank the form, so a flat key would defeat clearing. Restoration reads the nonce from session state and runs in the button handler **before** the rerun that rebuilds the form — Streamlit reads session state when a widget is created, so a later write would not reach it.
+Every analyse-form widget carries an explicit key suffixed with the analyse nonce (`ca_chest_{nonce}`, `ca_reviews_{nonce}`, …). The nonce is what **Clear form** and **Analyse another item** increment to blank the form, so a flat key would defeat clearing. Restoration reads the nonce from session state. **Edit my information** writes in the button handler **before** the rerun that rebuilds the form. **Load an example item** sits *outside* the form and *above* it, so `restore_custom_form` runs in the same run before the inputs are created. Streamlit reads session state when a widget is created, so a write after `st.form` would not reach it.
 
 ---
 
@@ -186,7 +187,10 @@ Seeded items are four **research-backed scenarios**, all labelled fictional / si
 
 ### 6.2 Analyse an Item (Live)
 
-- The form is always shown, as **one** `st.form`. Submit (`Analyse this item`) immediately builds `custom_analysis_payload` from the widgets and validates **that** object.
+- The analyse page is a **prototype testing surface**, not a live AJIO product picker. A callout immediately below the heading (`ANALYSE_PROTOTYPE_CALLOUT`) states that in an integrated experience, product details, size charts, and reviews would auto-fill from the selected wishlist item, and that manual entry exists only to test products outside the sample wishlist.
+- The product block is titled **Product evidence — auto-filled in the integrated experience**. Field labels state requirement clearly: Product Name, Category, and Usual Size are **required**; Size Chart, Review Snippets, Chest/Bust, and Waist are **optional, improves confidence**; Current Price and Availability Notes are **optional**.
+- **Load an example item** is a secondary button *outside* the form. It prefills widgets from a hardcoded `example_analyse_payload()` (a realistic dress with a size chart, two review snippets, size profile, save reason, and occasion timing). It does **not** submit, scrape, fetch a URL, or call an API.
+- The form is always shown, as **one** `st.form`. Submit (`Analyse this item`, still the primary action) immediately builds `custom_analysis_payload` from the widgets and validates **that** object.
 - Required: product name, category, usual size, and **at least one** of size chart, a body measurement, or fit-related reviews. Empty strings and zero measurements become `None` and are not treated as present.
 - Optional: brand, price, size chart, reviews, availability notes (user-reported, not live inventory), measurements, why saved, occasion, timing, open uncertainties, comparison, extra context. Every field is sent to Groq when a call is made.
 - Missing key: analyse page shows *Live AI analysis is unavailable because the deployment secret is not configured.* Submit still runs the **rule-based fallback** on the payload. Sample Wishlist is unaffected.
@@ -366,11 +370,13 @@ Absence of the key is a valid state: Sample Wishlist remains the product; Analys
 - Evidence lines that restate the shopper's own chart, measurements, reviews, and timing
 - Automated unittest suite in `tests/test_engines.py`, including a regression class for the strict schema, the three failure states, and retry / edit state retention
 - Static research-insight sentence (copy, not a live statistic)
-- Prototype labelling in the banner, stock chips, review captions, and expanders
+- Prototype labelling in the banner, stock chips, review captions, expanders, and the Analyse an Item testing-mode callout
+- Hardcoded **Load an example item** payload for prototype testing (not a catalogue, URL, or AJIO integration)
 
 ### Simulated / fictional (labelled in the UI)
 
 - The four catalogue items, size charts, and review snippets
+- The hardcoded **Load an example item** dress (chart, two reviews, measurements, save reason, occasion timing)
 - Save context (reason, occasion, intent, comparison, open questions)
 - `stock_status` / availability chips
 - Product photographs (hosted decorative images, not a live catalogue feed)
@@ -397,7 +403,7 @@ Four views, one Streamlit page. Body text is ~15px. Statuses always include word
 1. Chrome: title, **Sample Wishlist** / **Analyse an Item** (`nav_button` → `view=wishlist` or `view=analyse`), prototype banner.
 2. **Sample Wishlist:** research insight, size profile + Reset, health strip, four item cards (two panels, fit note), expander “How this recommendation was generated,” **Update context** / **View evidence** → `view=detail&item=<id>`.
 3. **Item detail:** **Back to wishlist** (same tab), save context, both panels, native measurement evidence (profile / closest chart size / suggested size), simulated review snippets, shopper-facing “Based on” list, optional size-chart expander.
-4. **Analyse an Item:** two-section form in one `st.form` (product information, decision context), verification policy, Clear form. Secret warning when the key is missing.
+4. **Analyse an Item:** prototype testing callout; **Load an example item** (secondary, outside the form); two-section form in one `st.form` (**Product evidence — auto-filled in the integrated experience**, then decision context) with required / optional field labels; verification policy; **Analyse this item** (primary submit); Clear form. Secret warning when the key is missing.
 5. **Live result:** two panels + evidence lines that quote the submitted values; or Needs more information with **accurate** missing fields; or a processing error; or a labelled rule fallback (never silently shown as live AI). Processing and service failures offer **Retry analysis** (primary) — one more call on the stored payload, staying on the page — and **Edit my information** (secondary), which restores every widget value and returns to the form. Every widget and button on both screens has an explicit key.
 
 ---
@@ -415,6 +421,7 @@ Four views, one Streamlit page. Body text is ~15px. Statuses always include word
 | **Retry with no stored payload** | `validation_error` | Records the missing-information state instead of navigating; nothing is silently re-sent |
 | **Edit my information** | cleared | Widgets rewritten from the stored payload, stale result dropped, back to `view=analyse` with chest / waist / usual size / chart / reviews / save reason / timing intact |
 | Reset / Clear form | — | Clears size widgets / analyse form nonce and live result; navigation otherwise preserves session payload |
+| **Load an example item** | unchanged | Prefills analyse widgets from `example_analyse_payload()` via `restore_custom_form`. Does not set `custom_analysis_payload` or call Groq until the shopper submits |
 
 The Groq client is imported only inside the live call path so a missing optional dependency cannot take down Sample Wishlist.
 

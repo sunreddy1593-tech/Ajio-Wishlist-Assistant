@@ -1400,6 +1400,121 @@ class FailureStateTests(unittest.TestCase):
         self.assertNotIn("restore_custom_form", called)
         self.assertNotIn("edit_saved_analysis", called)
 
+    def test_analyse_page_copy_marks_prototype_testing_and_field_requirements(self) -> None:
+        self.assertEqual(
+            app.ANALYSE_PROTOTYPE_CALLOUT,
+            "Prototype testing mode: In an integrated AJIO experience, product "
+            "details, size charts and reviews would be filled automatically from "
+            "the selected wishlist item. Manual entry is included here only to "
+            "test the assistant with products outside the sample wishlist.",
+        )
+        source = Path(app.__file__).read_text(encoding="utf-8")
+        self.assertIn("ANALYSE_PROTOTYPE_CALLOUT", source)
+        self.assertIn(
+            "Product evidence — auto-filled in the integrated experience", source
+        )
+        self.assertIn("Load an example item", source)
+        self.assertIn("Analyse this item", source)
+        for label in (
+            "Product Name — required",
+            "Category — required",
+            "Usual Size — required",
+            "Size Chart — optional, improves confidence",
+            "Review Snippets — optional, improves confidence",
+            "Chest/Bust — optional, improves confidence",
+            "Waist — optional, improves confidence",
+            "Current Price — optional",
+            "Availability Notes — optional",
+        ):
+            self.assertIn(label, source)
+
+    def test_load_example_prefills_widgets_without_submitting_analysis(self) -> None:
+        session = {
+            "analyse_nonce": 4,
+            "ca_prod_name_4": "typed by shopper",
+            "ca_chest_4": 0.0,
+            "ca_waist_4": 0.0,
+        }
+        with patch.object(app.st, "session_state", session):
+            app.load_example_analyse_form()
+
+        example = app.example_analyse_payload()
+        self.assertEqual(session["ca_prod_name_4"], example["product_name"])
+        self.assertEqual(session["ca_brand_4"], example["brand"])
+        self.assertEqual(session["ca_category_4"], example["category"])
+        self.assertEqual(session["ca_price_4"], example["price"])
+        self.assertEqual(session["ca_size_chart_4"], example["size_chart"])
+        self.assertEqual(session["ca_reviews_4"], example["reviews"])
+        self.assertEqual(session["ca_usual_4"], "M")
+        self.assertEqual(session["ca_chest_4"], 36.0)
+        self.assertEqual(session["ca_waist_4"], 30.0)
+        self.assertEqual(session["ca_save_reason_4"], example["why_saved"])
+        self.assertEqual(session["ca_occasion_4"], "Yes")
+        self.assertEqual(session["ca_timeline_4"], "9 days")
+        self.assertEqual(session["ca_comparing_4"], "No")
+        snippets = [
+            line for line in example["reviews"].splitlines() if line.strip()
+        ]
+        self.assertEqual(len(snippets), 2)
+        self.assertNotIn("custom_analysis_payload", session)
+        self.assertNotIn("custom_analysis_result", session)
+
+    def test_example_item_is_complete_enough_to_analyse(self) -> None:
+        payload = app.example_analyse_payload()
+        self.assertEqual(app.validate_custom_payload(payload), [])
+        self.assertIn(payload["category"], app.ANALYSE_CATEGORIES)
+        self.assertIn(payload["usual_size"], app.LETTER_SIZES)
+
+    def test_load_example_is_outside_the_form_and_analyse_stays_the_submit(self) -> None:
+        tree = ast.parse(Path(app.__file__).read_text(encoding="utf-8"))
+        page = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "render_analyse_page"
+        )
+        form_line = min(
+            node.lineno
+            for node in ast.walk(page)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and getattr(node.func.value, "id", None) == "st"
+            and node.func.attr == "form"
+        )
+        load_lines = [
+            node.lineno
+            for node in ast.walk(page)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and getattr(node.func.value, "id", None) == "st"
+            and node.func.attr == "button"
+            and any(
+                isinstance(arg, ast.Constant) and arg.value == "Load an example item"
+                for arg in node.args
+            )
+        ]
+        submit_lines = [
+            node.lineno
+            for node in ast.walk(page)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and getattr(node.func.value, "id", None) == "st"
+            and node.func.attr == "form_submit_button"
+            and any(
+                isinstance(arg, ast.Constant) and arg.value == "Analyse this item"
+                for arg in node.args
+            )
+        ]
+        self.assertTrue(load_lines, "Load an example item button is missing")
+        self.assertTrue(submit_lines, "Analyse this item submit is missing")
+        self.assertLess(max(load_lines), form_line)
+        self.assertGreater(min(submit_lines), form_line)
+        called = {
+            node.func.id
+            for node in ast.walk(page)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertIn("load_example_analyse_form", called)
+
     def test_editing_without_a_stored_payload_does_not_raise(self) -> None:
         session: dict = {}
         with patch.object(app.st, "session_state", session):
