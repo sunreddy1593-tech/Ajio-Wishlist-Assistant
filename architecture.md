@@ -43,8 +43,11 @@ A later production system could add other barriers (live inventory, price compar
 4. **Save age is not a reason to buy.** `saved_days_ago` is a measurement / context signal (how long this sample has sat). It never produces **Ready to buy**.
 5. **Simulated stock never independently creates urgency.** Sample `stock_status` may appear as labelled supporting context. It is never live inventory and never the sole — or independent — reason to buy.
 6. **Demo never depends on a model.** Seeded JSON + deterministic rules. Missing `GROQ_API_KEY` must not crash Sample Wishlist.
-7. **Live is one round-trip.** Analyse an Item uses a single Groq chat call (`messages=[{system},{user}]`), JSON in, two panels out. No streaming, no tools, no chain.
+7. **Live is one round-trip when a key exists.** Analyse an Item uses a single Groq chat call (`messages=[{system},{user}]`), JSON in, two panels out. No streaming, no tools, no chain. If the key is missing or Groq fails, a **labelled rule-based fallback** uses the submitted payload — it is not presented as an LLM result.
 8. **Honesty about simulation.** Sample products, reviews, charts, availability, and product photos are prototype data and are labelled as such.
+9. **Submitted fields are never treated as missing.** Custom analysis validates the saved form payload. Needs more information lists only fields that validation confirmed are absent. API and JSON failures are not converted into missing-information copy.
+10. **Shopper-facing copy.** Internal keys (`comparison_status`, `intent_state`, …) stay in Python. The UI shows translated sentences. Measurement evidence is native Streamlit, not raw HTML tags.
+11. **Same-tab navigation.** In-app views use Streamlit buttons that set `st.query_params` and `st.rerun()`. Markdown / HTML anchors are not used for internal nav (Streamlit would open a new tab).
 
 ---
 
@@ -61,7 +64,7 @@ Shopper already saved an item
 │  mvp/streamlit_app.py                       │
 │                                             │
 │  Sample Wishlist: JSON + local rules        │
-│  Analyse an Item: paste form → one Groq call│
+│  Analyse an Item: form → Groq or rule fallback │
 └──────────────────┬──────────────────────────┘
                    │
                    ▼
@@ -74,14 +77,14 @@ Shopper already saved an item
      (MVP stops here — no checkout)
 ```
 
-**Views** (query param `view`; no login, no server-side routes):
+**Views** (query param `view`; no login, no server-side routes). Internal hops use `nav_to` (buttons, same browser tab):
 
-| View | Purpose |
+| Query | Purpose |
 | --- | --- |
-| `wishlist` | Four fictional sample saves; size profile; health strip; two panels each |
-| `detail` | Evidence page for one sample item (chart, simulated reviews, decision evidence) |
-| `analyse` | Form to paste a custom item |
-| `live_result` | Two-panel result from Groq (or a grounded fallback) |
+| `view=wishlist` | Four fictional sample saves; size profile; health strip; two panels each |
+| `view=detail&item=<id>` | Evidence page for one sample item (chart, simulated reviews, decision evidence) |
+| `view=analyse` | Form to paste a custom item (one `st.form`; submit builds the payload immediately) |
+| `view=live_result` | Two-panel result from Groq, a labelled rule fallback, a parse error, or genuine Needs more information |
 
 ---
 
@@ -92,6 +95,7 @@ Shopper already saved an item
 ├── problem statement.md
 ├── architecture.md              # this file
 ├── implementation plan.md       # as-built plan + test checks
+├── tests/test_engines.py        # unittest suite (run from repo root)
 ├── .streamlit/config.toml       # light theme (no secrets)
 └── mvp/
     ├── streamlit_app.py         # UI + demo engines + Groq adapter
@@ -126,11 +130,13 @@ Usual S–XXL         │       ▼                                      │
                     + item detail (evidence)
                             ▲
                     ┌───────┴─ Analyse an Item (optional) ─────────┐
-Paste: product,     │  Guard: no key → form still shown; submit    │
-chart, reviews,     │        shows a note; Sample Wishlist works   │
-size, occasion,     │  One Groq call  model openai/gpt-oss-120b    │
-comparison, gaps    │  Parse JSON → normalize → render             │
-                    │  try/except → never show a traceback         │
+Paste: product,     │  Form submit → session payload → validate     │
+chart, reviews,     │  Missing fields only if validation says so   │
+size, occasion,     │  Key present: one Groq call (gpt-oss-120b)   │
+comparison, gaps    │  No key / Groq HTTP fail: labelled rule      │
+                    │        fallback on the submitted payload     │
+                    │  Bad JSON / unknown enums: processing error  │
+                    │  try/except → never a traceback or API key   │
                     └──────────────────────────────────────────────┘
 ```
 
@@ -143,10 +149,12 @@ comparison, gaps    │  Parse JSON → normalize → render             │
 | **Next-action engine (demo)** | Situation → `decision_status`, `decision_reason`, `next_step`, `evidence_used` |
 | **Wishlist health** | Demo strip: saved count, ready to decide, need another check, worth waiting |
 | **Item detail** | Same engines; shows save context, chart measurements, simulated reviews, evidence |
-| **Live adapter** | Build prompt from the form, one Groq call, strip fences, `json.loads`, schema normalize |
+| **Live adapter** | Build prompt from **all** custom form fields, one Groq call, strip fences, `json.loads`, schema check. Unknown enums are parse failures, not silent Needs more information |
+| **Rule fallback** | Deterministic `compute_fit` / `compute_next_action` on the submitted payload when Groq is unavailable. Label: *Rule-based fallback — live AI analysis unavailable.* `is_live=False` even after item identity is copied onto the result |
+| **Evidence formatter** | `format_decision_evidence` translates internal engine keys before any shopper-facing list |
 | **Panel renderer** | Fit + next-action panels on wishlist cards, detail, and live result |
 
-Session state is ephemeral (size widgets, analyse form nonce, live result). Nothing is persisted.
+Session state is ephemeral (size widgets, analyse form nonce, `custom_analysis_payload` / result). Navigation does not wipe the size profile or the saved analyse payload. Nothing is persisted to disk.
 
 ---
 
@@ -172,19 +180,23 @@ Seeded items are four **research-backed scenarios**, all labelled fictional / si
 
 ### 6.2 Analyse an Item (Live)
 
-- The form is always shown. Submitting without `GROQ_API_KEY` shows a short note that Sample Wishlist still works; the app does not crash.
-- Required to submit: product name, category, usual size.
-- Optional: brand, price, size chart, reviews, availability notes (user-reported, not live inventory), measurements, why saved, occasion, timing, open uncertainties, comparison, extra context.
-- **One** `chat.completions.create`: `temperature=0.3`, `max_tokens=700`, no stream, no tools.
-- Model is instructed to return **only** JSON. Code fences are stripped before parse.
-- Thin or unreadable replies become **Needs more information** — the app does not invent blockers.
-- Failures (HTTP, missing key after submit, bad JSON) surface a short message — never a traceback.
+- The form is always shown, as **one** `st.form`. Submit (`Analyse this item`) immediately builds `custom_analysis_payload` from the widgets and validates **that** object.
+- Required: product name, category, usual size, and **at least one** of size chart, a body measurement, or fit-related reviews. Empty strings and zero measurements become `None` and are not treated as present.
+- Optional: brand, price, size chart, reviews, availability notes (user-reported, not live inventory), measurements, why saved, occasion, timing, open uncertainties, comparison, extra context. Every field is sent to Groq when a call is made.
+- Missing key: analyse page shows *Live AI analysis is unavailable because the deployment secret is not configured.* Submit still runs the **rule-based fallback** on the payload. Sample Wishlist is unaffected.
+- **One** `chat.completions.create` when a key exists: `temperature=0.3`, `max_tokens=700`, no stream, no tools. Model: `openai/gpt-oss-120b`.
+- Model is instructed to return **only** JSON (no markdown). Optional ` ```json ` fences are stripped, then parsed and schema-checked.
+- Three outcomes that must not be collapsed:
+  - **Genuine missing information** → Needs more information, listing only fields validation confirmed are absent.
+  - **Groq / HTTP / missing key** → labelled rule fallback (not Needs more information).
+  - **Unreadable JSON or unknown enums** → *The analysis response could not be processed. Please try again.* (not Needs more information).
+- Failures never show a traceback or the API key. Logs record exception type names only.
 
 ---
 
 ## 7. Decision statuses
 
-Demo and live share the same badge vocabulary. Demo can emit **Check fit first**. Live JSON is allowed the statuses in the Groq contract; unknown enums fall back to **Needs more information**. Aliases such as `Buy now` → Ready to buy and `Wait` → Worth waiting are accepted if a model still uses them.
+Demo and live share the same badge vocabulary. Demo can emit **Check fit first**. Live JSON is allowed the statuses in the Groq contract. **Unknown enums are schema failures** (`GroqParseError`), not a silent Needs more information. Aliases such as `Buy now` → Ready to buy and `Wait` → Worth waiting are accepted if a model still uses them.
 
 | Status | Meaning |
 | --- | --- |
@@ -194,7 +206,7 @@ Demo and live share the same badge vocabulary. Demo can emit **Check fit first**
 | **Compare first** | The save is still being compared with another option |
 | **Worth waiting** | No immediate dated need; the item can stay saved |
 | **Reconsider this save** | Intent is stale, or uncertain with no stated like/use |
-| **Needs more information** | Live only: supplied evidence is insufficient to recommend a size or a next action |
+| **Needs more information** | Analyse path only: validation found insufficient supplied evidence. Not used for missing-key, Groq, or parse failures |
 
 There is no **Buy now** / **Wait** status in the current engines.
 
@@ -223,15 +235,17 @@ These rules are the executable version of the two opportunity areas. They are no
 
 | Condition | Level |
 | --- | --- |
-| Conflicting reviews, or neither chart nor reviews help | **Low** |
-| Clear review signal **or** measurement match, but not both | **Medium** |
-| Measurement match **and** a clear, non-conflicting review signal | **High** |
+| Measurement/chart match **and** consistent true-to-size reviews support the **same** size; no conflict | **High** |
+| Only one strong source (measurement **or** reviews), **or** reviews cause a **one-size** adjustment away from the direct measurement match | **Medium** |
+| Reviews conflict with each other; size chart and measurements are insufficient; or the suggested size is not on the chart (unsupported assumption) | **Low** |
+
+Example: chest 40 in matches M (40 in); reviews say the item runs small so L (42 in) is suggested → **Medium**, not High. The signals support sizing up; they do not independently agree on L.
 
 The UI states that this supports a decision from provided data and **cannot guarantee actual fit**.
 
 ### 8.2 Next action — research-grounded rules
 
-`compute_next_action(item, fit)` — **first match wins**. Reasons cite only sample or user-supplied fields.
+`compute_next_action(item, fit, *, gaps=None)` — **first match wins**. Reasons cite only sample or user-supplied fields. When `gaps` is passed (custom-analysis fallback after validation already passed), the engine does **not** claim `size_chart is missing` solely because the shopper used reviews or measurements instead of a chart.
 
 | Situation | Status |
 | --- | --- |
@@ -249,7 +263,7 @@ Comparison is evaluated **before** missing-info so an active comparison is the a
 ### 8.3 Save age (`saved_days_ago`)
 
 - Shown on the card (“Saved N days ago”).
-- May appear in **evidence** for Worth waiting or Reconsider this save, explicitly tagged as age of the save / how long the sample has sat — **not a buy trigger**.
+- May appear in **engine evidence** for Worth waiting or Reconsider this save, tagged as age of the save — **not a buy trigger**. Shopper-facing lists translate that line (no `saved_days_ago:` prefix).
 - **Never** a condition for Ready to buy.
 - Health counts do **not** treat recency as urgency.
 
@@ -265,7 +279,7 @@ Comparison is evaluated **before** missing-info so an active comparison is the a
 
 **Model:** `openai/gpt-oss-120b`
 
-**System role:** wishlist decision assistant. Use only supplied fields. Do not invent blockers, scarcity, or price-watching. Do not treat stock notes as live inventory or as the sole reason to buy. Do not recommend discounts. If evidence is insufficient, use **Needs more information**.
+**System role:** wishlist decision assistant. Use only supplied fields. Do not invent blockers, scarcity, or price-watching. Do not treat stock notes as live inventory or as the sole reason to buy. Do not recommend discounts. Do not ask the shopper to add a size chart, reviews, or measurements when those fields are already supplied. If evidence is insufficient, use **Needs more information**.
 
 **Response schema**
 
@@ -282,7 +296,9 @@ Comparison is evaluated **before** missing-info so an active comparison is the a
 }
 ```
 
-The UI maps this onto the same two panels as demo. Unknown `fit_confidence` → Low. Unknown `decision_status` → Needs more information.
+The UI maps this onto the same two panels as demo. Unknown `fit_confidence` or `decision_status` values fail schema validation (processing error), not a silent Needs more information fallback.
+
+Shopper-facing evidence lists run through `format_decision_evidence` so engine keys such as `comparison_status: comparing` never appear as raw text.
 
 ---
 
@@ -309,9 +325,9 @@ No user accounts. Shopper size lives only in the session.
 
 | Key | Used when |
 | --- | --- |
-| `GROQ_API_KEY` | Analyse an Item only |
+| `GROQ_API_KEY` | Analyse an Item only — read from `st.secrets`, never from environment variables |
 
-Absence of the key is a valid state: Sample Wishlist remains the product.
+Absence of the key is a valid state: Sample Wishlist remains the product; Analyse still runs the labelled rule fallback.
 
 ---
 
@@ -321,7 +337,9 @@ Absence of the key is a valid state: Sample Wishlist remains the product.
 
 - Deterministic fit and next-action rules on Sample Wishlist
 - One Groq JSON call when a key is present and the analyse form is submitted
-- Session-only size profile and live result
+- Labelled rule-based fallback on the submitted payload when the key is missing or Groq fails
+- Session-only size profile, analyse payload, and live result
+- Automated unittest suite in `tests/test_engines.py`
 - Static research-insight sentence (copy, not a live statistic)
 - Prototype labelling in the banner, stock chips, review captions, and expanders
 
@@ -349,13 +367,13 @@ The app stops when the shopper has a suggested size and a next action. It does n
 
 ## 12. UI architecture
 
-Four views, one Streamlit page. Body text is ~15px. Statuses always include words, not color alone.
+Four views, one Streamlit page. Body text is ~15px. Statuses always include words, not color alone. Internal navigation is **buttons**, not `<a href>` / `st.link_button`.
 
-1. Chrome: title, Sample Wishlist / Analyse an Item, prototype banner.
-2. **Sample Wishlist:** research insight, size profile + Reset, health strip, four item cards (two panels, fit note), expander “How this recommendation was generated,” links to item detail.
-3. **Item detail:** save context, both panels, evidence, optional size-chart expander.
-4. **Analyse an Item:** two-section form (product information, decision context), verification policy, Clear form.
-5. **Live result:** two panels + evidence lists, or a Needs more information state asking for missing details.
+1. Chrome: title, **Sample Wishlist** / **Analyse an Item** (`nav_button` → `view=wishlist` or `view=analyse`), prototype banner.
+2. **Sample Wishlist:** research insight, size profile + Reset, health strip, four item cards (two panels, fit note), expander “How this recommendation was generated,” **Update context** / **View evidence** → `view=detail&item=<id>`.
+3. **Item detail:** **Back to wishlist** (same tab), save context, both panels, native measurement evidence (profile / closest chart size / suggested size), simulated review snippets, shopper-facing “Based on” list, optional size-chart expander.
+4. **Analyse an Item:** two-section form in one `st.form` (product information, decision context), verification policy, Clear form. Secret warning when the key is missing.
+5. **Live result:** two panels + translated evidence lists; or Needs more information with **accurate** missing fields; or a processing error; or a labelled rule fallback (never silently shown as live AI).
 
 ---
 
@@ -363,13 +381,16 @@ Four views, one Streamlit page. Body text is ~15px. Statuses always include word
 
 | Case | Behaviour |
 | --- | --- |
-| No Groq key | Sample Wishlist works; analyse submit shows a friendly note |
+| No Groq key | Sample Wishlist works. Analyse shows the secret-missing warning. Submit uses the labelled rule fallback on the payload |
 | Sample JSON missing | Error in the page, no traceback |
-| Groq / parse failure | Friendly error; sample path untouched |
-| Empty or unreadable model JSON | Needs more information fallback — no invented blocker |
-| Reset / Clear form | Clears size widgets and any live result |
+| Groq HTTP / SDK failure | Labelled rule fallback on the submitted payload — not Needs more information |
+| Empty, unreadable, or schema-invalid model JSON | Processing error: *The analysis response could not be processed. Please try again.* — not Needs more information, no traceback |
+| Genuine missing fields | Needs more information listing only fields validation confirmed are absent |
+| Reset / Clear form | Clears size widgets / analyse form nonce and live result; navigation otherwise preserves session payload |
 
 The Groq client is imported only inside the live call path so a missing optional dependency cannot take down Sample Wishlist.
+
+Automated checks: `python -m unittest tests.test_engines` from the repository root.
 
 ---
 
@@ -401,6 +422,7 @@ Local: `streamlit run mvp/streamlit_app.py` from the repo root. Sample Wishlist 
 | Recency must not fake urgency | `saved_days_ago` is context, not Ready to buy |
 | Simulated stock must not fake scarcity | Stock is labelled supporting context only |
 | No discounts | Rules and prompt forbid coupons and sale-waits |
+| Honest custom analysis | Submitted chart/reviews/size are used; API errors are not missing-information |
 
 ---
 

@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import re
 import time
 from pathlib import Path
 
 import streamlit as st
+
+logger = logging.getLogger("wishlist_assistant")
 
 APP_DIR = Path(__file__).resolve().parent
 SAMPLE_PATH = APP_DIR / "sample_wishlist.json"
@@ -43,8 +46,83 @@ TRUE_SIZE_KEYS = (
     "fits as expected",
     "as described",
 )
+FIT_REVIEW_WORD_RE = re.compile(
+    r"\b(fit|fits|fitting|sizing|size|tight|loose|snug|baggy|small|large|"
+    r"chest|waist|bust|shrink)\b"
+)
 
 GROQ_MODEL = "openai/gpt-oss-120b"
+DEBUG_MODE = False
+API_UNAVAILABLE_MESSAGE = (
+    "Analysis is temporarily unavailable. Please try again."
+)
+PARSE_FAILED_MESSAGE = (
+    "The analysis response could not be processed. Please try again."
+)
+SECRET_MISSING_MESSAGE = (
+    "Live AI analysis is unavailable because the deployment secret is not configured."
+)
+RULE_FALLBACK_LABEL = (
+    "Rule-based fallback — live AI analysis unavailable."
+)
+CUSTOM_PAYLOAD_FIELDS = (
+    "product_name",
+    "brand",
+    "product",
+    "category",
+    "price",
+    "why_saved",
+    "occasion_for",
+    "occasion_timing",
+    "unresolved_questions",
+    "comparison_status",
+    "usual_size",
+    "chest",
+    "waist",
+    "size_info",
+    "size_chart",
+    "reviews",
+    "availability",
+    "extra_context",
+)
+CUSTOM_PAYLOAD_FIELD_LABELS = {
+    "product_name": "Product name",
+    "brand": "Brand",
+    "product": "Product name / brand",
+    "category": "Category",
+    "price": "Price",
+    "why_saved": "Why they saved it",
+    "occasion_for": "Is it for a particular occasion?",
+    "occasion_timing": "When they need it",
+    "unresolved_questions": "What they are still unsure about",
+    "comparison_status": "Are they comparing another item?",
+    "usual_size": "Usual size",
+    "chest": "Chest / bust (in)",
+    "waist": "Waist (in)",
+    "size_info": "Size and optional measurements",
+    "size_chart": "Size chart",
+    "reviews": "Review snippets",
+    "availability": "Availability notes (user-reported, not live inventory)",
+    "extra_context": "Additional context",
+}
+LIVE_RESULT_REQUIRED_KEYS = (
+    "fit_recommendation",
+    "fit_confidence",
+    "fit_reason",
+    "fit_evidence_used",
+    "decision_status",
+    "decision_reason",
+    "next_step",
+    "decision_evidence_used",
+)
+
+
+class GroqAPIError(Exception):
+    """Groq HTTP/SDK failure — not a missing-user-information problem."""
+
+
+class GroqParseError(Exception):
+    """Response JSON/schema could not be processed — not missing user input."""
 
 LIVE_DECISION_STATUSES = (
     "Ready to buy",
@@ -65,6 +143,7 @@ Rules:
 - Never invent scarcity. Never treat stock notes as live inventory or as the sole reason to buy.
 - Never recommend a discount, coupon, markdown, or waiting for a sale.
 - If evidence is insufficient to recommend a size or a next action, set decision_status to "Needs more information".
+- Do not ask the shopper to add a size chart, reviews, or measurements when those fields are already supplied (not "(not provided)").
 - In fit_reason and decision_reason, explain which supplied evidence informed the recommendation. List those items in fit_evidence_used and decision_evidence_used.
 
 Respond with ONLY valid JSON — no markdown, no code fences, no extra text. Exact schema:
@@ -311,6 +390,7 @@ def load_sample_wishlist() -> list[dict]:
 
 
 def get_groq_api_key() -> str | None:
+    """Read GROQ_API_KEY from st.secrets only. Never from the environment."""
     try:
         key = st.secrets["GROQ_API_KEY"]
     except Exception:
@@ -319,6 +399,17 @@ def get_groq_api_key() -> str | None:
         return None
     key = str(key).strip()
     return key or None
+
+
+def groq_key_detected() -> bool:
+    """True when a non-empty Groq secret is configured. Never returns the key."""
+    return bool(get_groq_api_key())
+
+
+def _log_adapter_error(context: str, exc: BaseException | None = None) -> None:
+    """Log adapter failures without the API key, payload, or exception text."""
+    name = type(exc).__name__ if exc is not None else "Error"
+    logger.error("%s (%s)", context, name)
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +452,21 @@ def _nudge_size(size: str, delta: int) -> str:
     if token.isdigit():
         return str(max(24, int(token) + 2 * delta))
     return str(size)
+
+
+def _one_size_step(from_size: str | None, to_size: str | None) -> bool:
+    """True when to_size is one chart step away from from_size."""
+    if not from_size or not to_size:
+        return False
+    a = str(from_size).strip().upper()
+    b = str(to_size).strip().upper()
+    if a == b:
+        return False
+    if a in LETTER_SIZES and b in LETTER_SIZES:
+        return abs(LETTER_SIZES.index(a) - LETTER_SIZES.index(b)) == 1
+    if a.isdigit() and b.isdigit():
+        return abs(int(a) - int(b)) == 2
+    return False
 
 
 def _usual_on_chart(usual_size: str, size_chart: dict) -> str:
@@ -415,10 +521,13 @@ def compute_fit(
     match_size, match_diff, match_dim = _closest_chart_size(size_chart, chest, waist)
 
     recommended = match_size or base
+    directional = False
     if signals["runs_small"] and not conflicting:
         recommended = _nudge_size(recommended, 1)
+        directional = True
     elif signals["runs_large"] and not conflicting:
         recommended = _nudge_size(recommended, -1)
+        directional = True
 
     measurement_agrees = (
         match_size is not None
@@ -429,6 +538,24 @@ def compute_fit(
         (signals["true_to_size"] or signals["runs_small"] or signals["runs_large"])
         and not conflicting
     )
+    reviews_agree_on_match = (
+        has_clear_review
+        and measurement_agrees
+        and recommended == match_size
+        and not directional
+    )
+    review_one_step_off = (
+        has_clear_review
+        and measurement_agrees
+        and directional
+        and _one_size_step(match_size, recommended)
+    )
+    rec_on_chart = bool(size_chart) and recommended in size_chart
+    unsupported = (
+        (bool(size_chart) and not rec_on_chart)
+        or (directional and measurement_agrees and not _one_size_step(match_size, recommended) and recommended != match_size)
+        or (not size_chart and not measurement_agrees)
+    )
 
     if conflicting:
         confidence = "Low"
@@ -436,23 +563,38 @@ def compute_fit(
             f"Reviews disagree on sizing, so stay near {base} until you can try it "
             "or check a store."
         )
-    elif measurement_agrees and has_clear_review:
-        confidence = "High"
-        if signals["runs_small"]:
+    elif unsupported:
+        confidence = "Low"
+        if not size_chart:
             reason = (
-                f"Your {match_dim} is closest to {match_size} on the chart, and "
-                f"reviews say it runs small — {recommended} is the safer pick."
+                f"Not enough to go on — using your usual {usual_size} as "
+                f"{recommended}. Add a size chart or measurements."
             )
-        elif signals["runs_large"]:
+        elif not rec_on_chart:
             reason = (
-                f"Your {match_dim} is closest to {match_size} on the chart, and "
-                f"reviews say it runs large — {recommended} should sit better."
+                f"Reviews point toward {recommended}, but that size is not on the "
+                "supplied chart, so the pick needs a check."
             )
         else:
             reason = (
-                f"Your {match_dim} matches {match_size} on the size chart and "
-                "reviewers call it true to size."
+                f"Suggested size {recommended} leans on an adjustment that the "
+                "chart and measurements do not support. Check fit before buying."
             )
+    elif reviews_agree_on_match:
+        confidence = "High"
+        reason = (
+            f"Your {match_dim} matches {match_size} on the size chart and "
+            "reviewers call it true to size."
+        )
+    elif review_one_step_off:
+        confidence = "Medium"
+        direction = "sizing up" if signals["runs_small"] else "sizing down"
+        reason = (
+            f"Your {match_dim} matches {match_size} on the chart, but reviews "
+            f"say it runs {'small' if signals['runs_small'] else 'large'}, so "
+            f"{recommended} is suggested. The signals support {direction} but "
+            f"do not directly agree on {recommended}."
+        )
     elif has_clear_review:
         confidence = "Medium"
         if signals["runs_small"]:
@@ -565,7 +707,9 @@ def _important_info_missing(item: dict) -> list[str]:
     return missing
 
 
-def compute_next_action(item: dict, fit: dict) -> dict:
+def compute_next_action(
+    item: dict, fit: dict, *, gaps: list[str] | None = None
+) -> dict:
     """Situation → next action. Reasons cite only sample or user-supplied fields."""
     conf = fit["fit_confidence"]
     intent = _norm(str(item.get("intent_state") or ""))
@@ -577,7 +721,7 @@ def compute_next_action(item: dict, fit: dict) -> dict:
     except (TypeError, ValueError):
         days_n = None
     strong_fit = conf in ("High", "Medium")
-    missing = _important_info_missing(item)
+    missing = _important_info_missing(item) if gaps is None else list(gaps)
 
     # Low fit confidence → Check fit first
     if conf == "Low":
@@ -733,13 +877,12 @@ def _map_decision_status(raw: str, fit_confidence: str = "") -> str:
         "needs more information": "Needs more information",
         "needs more info": "Needs more information",
     }
-    mapped = aliases.get(token, "")
-    if mapped:
-        return mapped
-    return "Needs more information"
+    return aliases.get(token, "")
 
 
 def verdict_kind(result: dict) -> str:
+    if result.get("failure_kind") in ("api", "parse", "no_secret"):
+        return ""
     status = result.get("decision_status") or ""
     if status in VERDICT_STYLES:
         return status
@@ -785,7 +928,17 @@ def wishlist_health_line(rows: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 def _strip_code_fences(text: str) -> str:
+    """Remove optional markdown code fences before JSON parsing."""
     cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    fenced = re.search(
+        r"```(?:json)?\s*(.*?)\s*```",
+        cleaned,
+        flags=re.I | re.DOTALL,
+    )
+    if fenced:
+        return fenced.group(1).strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, count=1, flags=re.I)
         cleaned = re.sub(r"\s*```$", "", cleaned)
@@ -793,7 +946,7 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _parse_model_json(raw: str) -> dict:
-    """Best-effort JSON object parse. Never raises."""
+    """Parse a JSON object after stripping optional fences. Never raises."""
     cleaned = _strip_code_fences(raw)
     if not cleaned:
         return {}
@@ -801,112 +954,372 @@ def _parse_model_json(raw: str) -> dict:
         parsed = json.loads(cleaned)
         return parsed if isinstance(parsed, dict) else {}
     except (json.JSONDecodeError, TypeError, ValueError):
-        pass
-    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-    if not match:
         return {}
+
+
+def _parse_groq_json(raw: str) -> dict:
+    """Strip fences, then parse JSON. Raises GroqParseError on failure."""
+    cleaned = _strip_code_fences(raw)
+    if not cleaned:
+        raise GroqParseError("empty Groq response")
     try:
-        parsed = json.loads(match.group(0))
-        return parsed if isinstance(parsed, dict) else {}
+        parsed = json.loads(cleaned)
     except (json.JSONDecodeError, TypeError, ValueError):
-        return {}
+        _log_adapter_error("Groq response JSON could not be parsed")
+        raise GroqParseError("Groq response JSON could not be parsed") from None
+    if not isinstance(parsed, dict) or not parsed:
+        raise GroqParseError("Groq response was not a JSON object")
+    return parsed
 
 
 def _build_live_user_prompt(payload: dict) -> str:
-    def field(label: str, key: str) -> str:
-        val = str(payload.get(key) or "").strip()
-        return f"{label}: {val if val else '(not provided)'}"
+    """Include every supplied custom-form field. Ask for JSON only."""
+    lines = [
+        "Advise on this wishlisted fashion item using only the fields below.",
+        "If a field is (not provided), do not invent it.",
+        "If evidence is insufficient, use decision_status \"Needs more information\".",
+        "Return ONLY a JSON object. No markdown, no code fences, no extra text.",
+        "",
+    ]
+    for key in CUSTOM_PAYLOAD_FIELDS:
+        label = CUSTOM_PAYLOAD_FIELD_LABELS[key]
+        val = payload.get(key)
+        if val is None:
+            text = ""
+        else:
+            text = str(val).strip()
+        lines.append(f"{label}: {text if text else '(not provided)'}")
+    return "\n".join(lines) + "\n"
 
-    return (
-        "Advise on this wishlisted fashion item using only the fields below. "
-        "If a field is (not provided), do not invent it. "
-        "If evidence is insufficient, use decision_status \"Needs more information\". "
-        "Return ONLY the JSON object.\n\n"
-        f"{field('Product name / brand', 'product')}\n"
-        f"{field('Category', 'category')}\n"
-        f"{field('Price', 'price')}\n"
-        f"{field('Why they saved it', 'why_saved')}\n"
-        f"{field('Is it for a particular occasion?', 'occasion_for')}\n"
-        f"{field('When they need it', 'occasion_timing')}\n"
-        f"{field('What they are still unsure about', 'unresolved_questions')}\n"
-        f"{field('Are they comparing another item?', 'comparison_status')}\n"
-        f"{field('Size and optional measurements', 'size_info')}\n"
-        f"{field('Size chart', 'size_chart')}\n"
-        f"{field('Availability notes (user-reported, not live inventory)', 'availability')}\n"
-        f"{field('Additional context', 'extra_context')}\n"
-        f"Review snippets:\n{payload.get('reviews') or '(not provided)'}\n"
+
+def _blank_to_none(value):
+    """Empty strings and zero measurements become None. Other zeros unchanged."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, bool):
+        return value
+    return value
+
+
+def _none_if_zero_measure(value):
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        return text or None
+    if number == 0:
+        return None
+    return number
+
+
+def _has_usual_size(payload: dict) -> bool:
+    usual = payload.get("usual_size")
+    if usual not in (None, ""):
+        return True
+    return bool(re.search(r"\busual\b", _norm(str(payload.get("size_info") or ""))))
+
+
+def _has_body_measurement(payload: dict) -> bool:
+    for key in ("chest", "waist"):
+        val = payload.get(key)
+        if val in (None, ""):
+            continue
+        try:
+            if float(val) > 0:
+                return True
+        except (TypeError, ValueError):
+            if str(val).strip():
+                return True
+    info = _norm(str(payload.get("size_info") or ""))
+    return "chest" in info or "waist" in info or "bust" in info
+
+
+def _has_fit_review_evidence(payload: dict) -> bool:
+    reviews = payload.get("reviews")
+    snippets = payload.get("review_snippets")
+    parts: list[str] = []
+    if reviews:
+        parts.append(str(reviews))
+    if isinstance(snippets, (list, tuple)):
+        parts.extend(str(s) for s in snippets if s)
+    elif snippets:
+        parts.append(str(snippets))
+    blob = _norm(" ".join(parts))
+    if not blob:
+        return False
+    if any(_keyword_hit(blob, key) for key in RUN_SMALL_KEYS + RUN_LARGE_KEYS + TRUE_SIZE_KEYS):
+        return True
+    return bool(FIT_REVIEW_WORD_RE.search(blob))
+
+
+def _has_size_chart(payload: dict) -> bool:
+    chart = payload.get("size_chart")
+    if chart in (None, "", {}, []):
+        return False
+    if isinstance(chart, dict):
+        return bool(chart)
+    return bool(str(chart).strip())
+
+
+def validate_custom_payload(payload: dict) -> list[str]:
+    """Normalise blanks/zero measurements to None. Return actually-missing fields.
+
+    Does not claim a field is missing when it exists on the payload.
+    """
+    string_keys = (
+        "product",
+        "product_name",
+        "brand",
+        "category",
+        "price",
+        "why_saved",
+        "occasion_for",
+        "occasion_timing",
+        "unresolved_questions",
+        "comparison_status",
+        "size_info",
+        "size_chart",
+        "reviews",
+        "availability",
+        "extra_context",
+        "usual_size",
     )
+    for key in string_keys:
+        if key in payload:
+            payload[key] = _blank_to_none(payload[key])
+    for key in ("chest", "waist"):
+        if key in payload:
+            payload[key] = _none_if_zero_measure(payload[key])
+
+    missing: list[str] = []
+    if not (payload.get("product_name") or payload.get("product")):
+        missing.append("Product name")
+    if not payload.get("category"):
+        missing.append("Category")
+    if not _has_usual_size(payload):
+        missing.append("Usual size")
+    if not (
+        _has_size_chart(payload)
+        or _has_body_measurement(payload)
+        or _has_fit_review_evidence(payload)
+    ):
+        missing.append(
+            "Fit evidence (size chart, a body measurement, or fit-related reviews)"
+        )
+    return missing
+
+
+def build_custom_analysis_payload(
+    *,
+    prod_name,
+    brand,
+    category,
+    price,
+    size_chart,
+    reviews,
+    availability,
+    usual,
+    chest_in,
+    waist_in,
+    save_reason,
+    occasion,
+    timeline,
+    unsure,
+    comparing,
+    extra,
+) -> dict:
+    """Build one payload dict from the current form variables."""
+    name = _blank_to_none(prod_name)
+    brand_v = _blank_to_none(brand)
+    usual_v = _blank_to_none(usual)
+    chest = _none_if_zero_measure(chest_in)
+    waist = _none_if_zero_measure(waist_in)
+    save = _blank_to_none(save_reason)
+    chips = [str(c).strip() for c in (unsure or []) if str(c).strip()]
+    if "Nothing specific" in chips and len(chips) > 1:
+        chips = ["Nothing specific"]
+    size_bits = []
+    if usual_v:
+        size_bits.append(f"Usual {usual_v}")
+    if chest:
+        size_bits.append(f"chest {chest:g} in")
+    if waist:
+        size_bits.append(f"waist {waist:g} in")
+    if occasion == "Yes":
+        occasion_for = save or "Yes"
+    else:
+        occasion_for = "No specific occasion"
+    product_bits = [p for p in (name, brand_v) if p]
+    return {
+        "product": " ".join(product_bits) or None,
+        "product_name": name,
+        "brand": brand_v,
+        "category": _blank_to_none(category),
+        "price": _blank_to_none(price),
+        "why_saved": save,
+        "occasion_for": occasion_for,
+        "occasion_timing": _blank_to_none(timeline),
+        "unresolved_questions": ", ".join(chips) or None,
+        "comparison_status": "comparing" if comparing == "Yes" else "not_comparing",
+        "size_info": ", ".join(size_bits) or None,
+        "size_chart": _blank_to_none(size_chart),
+        "reviews": _blank_to_none(reviews),
+        "availability": _blank_to_none(availability),
+        "extra_context": _blank_to_none(extra),
+        "usual_size": usual_v,
+        "chest": chest,
+        "waist": waist,
+    }
 
 
 def _live_payload_too_thin(payload: dict) -> bool:
-    """True when there is not enough user-supplied evidence to ground an answer.
+    """True when fit analysis lacks chart, measurement, or fit-related reviews."""
+    missing = validate_custom_payload(dict(payload))
+    return any("fit evidence" in item.lower() for item in missing)
 
-    Category, usual size, default 'not comparing', and default 'no occasion'
-    are always present after form validation — they do not count as evidence.
-    Availability notes are not live inventory and are not enough on their own.
-    """
-    size_info = _norm(str(payload.get("size_info") or ""))
-    has_measurement = "chest" in size_info or "waist" in size_info
-    questions = _norm(str(payload.get("unresolved_questions") or ""))
-    has_questions = bool(questions) and questions not in (
-        "nothing specific",
-        "(not provided)",
-    )
-    comparing = _norm(str(payload.get("comparison_status") or ""))
-    has_compare = bool(comparing) and comparing not in (
-        "not_comparing",
-        "not comparing",
-        "none",
-        "no",
-        "(not provided)",
-    )
-    occasion_for = _norm(str(payload.get("occasion_for") or ""))
-    has_occasion = bool(occasion_for) and occasion_for not in (
-        "no specific occasion",
-        "no",
-        "(not provided)",
-    )
-    optional = (
-        str(payload.get("size_chart") or "").strip(),
-        str(payload.get("reviews") or "").strip(),
-        str(payload.get("why_saved") or "").strip(),
-        str(payload.get("occasion_timing") or "").strip(),
-        str(payload.get("extra_context") or "").strip(),
-    )
-    return not (
-        any(optional)
-        or has_measurement
-        or has_questions
-        or has_compare
-        or has_occasion
-    )
+
+def _field_is_present(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, dict, set)):
+        return bool(value)
+    if isinstance(value, (int, float)):
+        return value != 0
+    return True
+
+
+def payload_fields_present(payload: dict) -> dict[str, bool]:
+    """Boolean presence of each custom-form field. Never includes raw values."""
+    return {key: _field_is_present((payload or {}).get(key)) for key in CUSTOM_PAYLOAD_FIELDS}
+
+
+def _record_debug(update: dict) -> None:
+    """Store adapter diagnostics. Never stores the API key or raw personal inputs."""
+    if not DEBUG_MODE:
+        return
+    safe = dict(update)
+    safe.pop("api_key", None)
+    safe.pop("payload", None)
+    try:
+        current = dict(st.session_state.get("custom_analysis_debug") or {})
+        current.update(safe)
+        st.session_state["custom_analysis_debug"] = current
+    except Exception:
+        return
+
+
+def _empty_debug(payload: dict | None = None, *, key_detected: bool = False) -> dict:
+    return {
+        "payload_fields_present": payload_fields_present(payload or {}),
+        "validation_errors": [],
+        "groq_key_detected": bool(key_detected),
+        "api_call_succeeded": False,
+        "json_parse_succeeded": False,
+    }
+
+
+def _map_fit_confidence(raw) -> str:
+    token = _safe_str(raw).title()
+    if token in ("High", "Medium", "Low"):
+        return token
+    return {"high": "High", "medium": "Medium", "low": "Low"}.get(_norm(_safe_str(raw)), "")
+
+
+def validate_live_schema(parsed) -> list[str]:
+    """Return schema errors. Does not coerce unknown statuses into Needs more information."""
+    if not isinstance(parsed, dict):
+        return ["Response is not a JSON object"]
+    if not parsed or parsed.get("_parse_failed"):
+        return ["Response JSON object is empty or unreadable"]
+    errors: list[str] = []
+    for key in LIVE_RESULT_REQUIRED_KEYS:
+        if key not in parsed:
+            errors.append(f"Missing field: {key}")
+    if "fit_confidence" in parsed and not _map_fit_confidence(parsed.get("fit_confidence")):
+        errors.append("Invalid fit_confidence")
+    if "decision_status" in parsed:
+        mapped = _map_decision_status(_safe_str(parsed.get("decision_status")))
+        if not mapped or mapped not in VERDICT_STYLES:
+            errors.append("Invalid decision_status")
+    for key in ("fit_evidence_used", "decision_evidence_used"):
+        if key in parsed and parsed[key] is not None and not isinstance(
+            parsed[key], (str, list, tuple)
+        ):
+            errors.append(f"Invalid {key}")
+    for key in ("fit_reason", "decision_reason", "next_step"):
+        if key in parsed and isinstance(parsed.get(key), dict):
+            errors.append(f"Invalid {key}")
+    return errors
 
 
 def call_groq(payload: dict, api_key: str) -> dict:
-    from groq import Groq
+    """One Groq chat call. Raises GroqAPIError or GroqParseError. Never logs the key."""
+    try:
+        from groq import Groq
+    except Exception as exc:
+        _log_adapter_error("Groq client is unavailable", exc)
+        raise GroqAPIError("Groq client is unavailable") from None
 
-    client = Groq(api_key=api_key)
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _build_live_user_prompt(payload)},
-        ],
-        temperature=0.3,
-        max_tokens=700,
-    )
+    try:
+        client = Groq(api_key=api_key)
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": _build_live_user_prompt(payload)},
+            ],
+            temperature=0.3,
+            max_tokens=700,
+        )
+    except GroqAPIError:
+        raise
+    except GroqParseError:
+        raise
+    except Exception as exc:
+        _log_adapter_error("Groq API request failed", exc)
+        raise GroqAPIError("Groq API request failed") from None
+
     try:
         raw = (response.choices[0].message.content or "").strip()
-    except (AttributeError, IndexError, TypeError):
-        return {}
-    return _parse_model_json(raw)
+    except (AttributeError, IndexError, TypeError) as exc:
+        _log_adapter_error("Groq response had no message content", exc)
+        raise GroqParseError("Groq response had no message content") from None
+
+    return _parse_groq_json(raw)
 
 
-def _live_fallback_result(message: str = "") -> dict:
+def _apply_item_identity(result: dict, payload: dict | None) -> dict:
+    payload = payload or {}
+    result["name"] = (
+        payload.get("product_name") or payload.get("product") or result.get("name") or "Your item"
+    )
+    result["brand"] = payload.get("brand") or result.get("brand") or ""
+    result["category"] = payload.get("category") or result.get("category") or "Custom paste"
+    if payload.get("price") is not None:
+        result["price"] = payload.get("price")
+    result["is_live"] = True
+    return result
+
+
+def _live_fallback_result(message: str = "", *, parse_failed: bool = False) -> dict:
     reason = (
         message
         or "Not enough supplied evidence to recommend a size or a next action."
     )
+    if parse_failed:
+        next_step = "Try Analyse again. Your submitted details were received."
+    else:
+        next_step = (
+            "Add a size chart, measurements, reviews, save reason, or what is "
+            "blocking you, then try again."
+        )
     return {
         "fit_recommendation": "—",
         "fit_confidence": "Low",
@@ -914,10 +1327,7 @@ def _live_fallback_result(message: str = "") -> dict:
         "fit_evidence_used": ["Insufficient supplied evidence"],
         "decision_status": "Needs more information",
         "decision_reason": reason,
-        "next_step": (
-            "Add a size chart, measurements, reviews, save reason, or what is "
-            "blocking you, then try again."
-        ),
+        "next_step": next_step,
         "decision_evidence_used": ["Insufficient supplied evidence"],
         "evidence_used": ["Insufficient supplied evidence"],
         "name": "Your item",
@@ -928,26 +1338,107 @@ def _live_fallback_result(message: str = "") -> dict:
         "stock_status": None,
         "review_snippets": [],
         "is_live": True,
+        "parse_failed": parse_failed,
+        "thin_payload": False,
+        "failure_kind": "parse" if parse_failed else "missing_information",
+        "missing_fields": [],
     }
 
 
-def normalize_live_result(parsed: dict) -> dict:
-    """Coerce model JSON into the live schema. Never raises."""
-    try:
-        if not isinstance(parsed, dict) or not parsed:
-            return _live_fallback_result()
+def _missing_information_result(payload: dict, missing: list[str]) -> dict:
+    reason = "Needs more information to analyse this item."
+    result = _live_fallback_result(reason, parse_failed=False)
+    result["failure_kind"] = "missing_information"
+    result["thin_payload"] = True
+    result["parse_failed"] = False
+    result["missing_fields"] = list(missing)
+    result["next_step"] = "; ".join(missing) if missing else result["next_step"]
+    result["decision_evidence_used"] = [f"Missing: {item}" for item in missing] or [
+        "Insufficient supplied evidence"
+    ]
+    result["evidence_used"] = list(result["decision_evidence_used"])
+    return _apply_item_identity(result, payload)
 
-        conf = _safe_str(parsed.get("fit_confidence"), "Low").title()
-        if conf not in ("High", "Medium", "Low"):
-            conf = "Low"
 
-        status = _map_decision_status(
-            _safe_str(parsed.get("decision_status")),
-            conf,
+def _api_unavailable_result(payload: dict | None = None) -> dict:
+    result = _live_fallback_result(API_UNAVAILABLE_MESSAGE, parse_failed=False)
+    result["decision_status"] = ""
+    result["failure_kind"] = "api"
+    result["parse_failed"] = False
+    result["thin_payload"] = False
+    result["missing_fields"] = []
+    result["next_step"] = "Please try again."
+    result["fit_evidence_used"] = []
+    result["decision_evidence_used"] = []
+    result["evidence_used"] = []
+    return _apply_item_identity(result, payload)
+
+
+def _secret_missing_result(payload: dict | None = None) -> dict:
+    result = _api_unavailable_result(payload)
+    result["failure_kind"] = "no_secret"
+    result["fit_reason"] = SECRET_MISSING_MESSAGE
+    result["decision_reason"] = SECRET_MISSING_MESSAGE
+    result["next_step"] = SECRET_MISSING_MESSAGE
+    return result
+
+
+def _parse_failed_result(payload: dict | None = None) -> dict:
+    result = _live_fallback_result(PARSE_FAILED_MESSAGE, parse_failed=True)
+    result["decision_status"] = ""
+    result["failure_kind"] = "parse"
+    result["parse_failed"] = True
+    result["thin_payload"] = False
+    result["missing_fields"] = []
+    result["next_step"] = "Please try again."
+    result["fit_evidence_used"] = []
+    result["decision_evidence_used"] = []
+    result["evidence_used"] = []
+    return _apply_item_identity(result, payload)
+
+
+def live_next_steps(payload: dict, result: dict) -> list[str]:
+    """Shopper next steps for a Needs-more-information result.
+
+    Only ask for fields that were not actually submitted.
+    """
+    kind = result.get("failure_kind")
+    if kind in ("api", "parse", "no_secret") or result.get("parse_failed"):
+        return ["Please try again"]
+    fields = result.get("missing_fields")
+    if fields:
+        return list(fields)
+    leftover = validate_custom_payload(dict(payload or {}))
+    if leftover:
+        return leftover
+    extra = str(result.get("next_step") or "").strip()
+    extra_l = extra.lower()
+    asks_for_provided = (
+        (_has_size_chart(payload) and "size chart" in extra_l)
+        or (_has_fit_review_evidence(payload) and "review" in extra_l)
+        or (
+            (_has_body_measurement(payload) or _has_usual_size(payload))
+            and ("measurement" in extra_l or "usual size" in extra_l)
         )
-        if status not in VERDICT_STYLES:
-            status = "Needs more information"
+    )
+    generic = "add a size chart, measurements, reviews"
+    if extra and generic not in extra_l and not asks_for_provided:
+        return [extra]
+    return ["Edit your information or try the analysis again"]
 
+
+def normalize_live_result(parsed: dict) -> dict:
+    """Coerce model JSON into the live schema.
+
+    Raises GroqParseError when JSON/schema is invalid.
+    Does not convert API or schema failure into missing information.
+    """
+    errors = validate_live_schema(parsed)
+    if errors:
+        raise GroqParseError("schema validation failed")
+    try:
+        conf = _map_fit_confidence(parsed.get("fit_confidence"))
+        status = _map_decision_status(_safe_str(parsed.get("decision_status")))
         fit_ev = _safe_str_list(parsed.get("fit_evidence_used"))
         dec_ev = _safe_str_list(
             parsed.get("decision_evidence_used") or parsed.get("evidence_used")
@@ -984,11 +1475,253 @@ def normalize_live_result(parsed: dict) -> dict:
             "stock_status": None,
             "review_snippets": [],
             "is_live": True,
+            "parse_failed": False,
+            "thin_payload": False,
+            "failure_kind": None,
+            "missing_fields": [],
         }
-    except Exception:
-        return _live_fallback_result(
-            "The live response could not be read. No blocker was assumed."
-        )
+    except GroqParseError:
+        raise
+    except Exception as exc:
+        _log_adapter_error("Analysis response schema could not be processed", exc)
+        raise GroqParseError("Analysis response schema could not be processed") from None
+
+
+def _parse_occasion_timing(raw) -> int | None:
+    blob = _norm(str(raw or ""))
+    if not blob or blob in ("no date", "no specific occasion", "none", "no"):
+        return None
+    days = re.search(r"(\d+)\s*day", blob)
+    if days:
+        return int(days.group(1))
+    weeks = re.search(r"(\d+)\s*week", blob)
+    if weeks:
+        return int(weeks.group(1)) * 7
+    if "next week" in blob:
+        return 7
+    if "tomorrow" in blob:
+        return 1
+    lone = re.search(r"\b(\d+)\b", blob)
+    if lone:
+        n = int(lone.group(1))
+        if 0 <= n <= 365:
+            return n
+    return None
+
+
+def _parse_size_chart_text(raw) -> dict:
+    """Deterministic parse of a pasted size chart into {size: {chest/waist}}."""
+    if isinstance(raw, dict):
+        out: dict = {}
+        for key, dims in raw.items():
+            if isinstance(dims, dict):
+                out[str(key).upper()] = dims
+        return out
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    tokens = list(re.finditer(r"\b(XXL|XL|XS|S|M|L)\b", text, flags=re.I))
+    chart: dict = {}
+    for i, match in enumerate(tokens):
+        size = match.group(1).upper()
+        end = tokens[i + 1].start() if i + 1 < len(tokens) else len(text)
+        chunk = text[match.start() : end]
+        dims: dict = {}
+        chest = re.search(r"(?:chest|bust)\s*[:=]?\s*(\d+(?:\.\d+)?)", chunk, flags=re.I)
+        waist = re.search(r"waist\s*[:=]?\s*(\d+(?:\.\d+)?)", chunk, flags=re.I)
+        if chest:
+            dims["chest"] = float(chest.group(1))
+        if waist:
+            dims["waist"] = float(waist.group(1))
+        if not dims:
+            number = re.search(r"(\d+(?:\.\d+)?)", chunk[match.end() - match.start() :])
+            if number:
+                dims["chest"] = float(number.group(1))
+        if dims:
+            chart[size] = dims
+    return chart
+
+
+def _review_snippets_from_payload(payload: dict) -> list[str]:
+    raw = payload.get("reviews")
+    if not raw:
+        return []
+    return [part.strip() for part in re.split(r"[\n;]+", str(raw)) if part.strip()]
+
+
+def _usual_size_from_payload(payload: dict) -> str:
+    usual = str(payload.get("usual_size") or "").strip().upper()
+    if usual in LETTER_SIZES or usual.isdigit():
+        return usual
+    match = re.search(
+        r"usual\s+([A-Za-z0-9]+)", str(payload.get("size_info") or ""), flags=re.I
+    )
+    if match:
+        token = match.group(1).upper()
+        if token in LETTER_SIZES or token.isdigit():
+            return token
+    return "M"
+
+
+def _item_from_custom_payload(payload: dict) -> dict:
+    """Map submitted custom-form fields onto the deterministic engine item."""
+    occasion_for = payload.get("occasion_for")
+    has_occasion = occasion_for not in (None, "", "No specific occasion", "No")
+    days = (
+        _parse_occasion_timing(payload.get("occasion_timing")) if has_occasion else None
+    )
+    intended = ""
+    if has_occasion:
+        if occasion_for not in ("Yes", "yes"):
+            intended = str(occasion_for)
+        elif payload.get("why_saved"):
+            intended = str(payload.get("why_saved"))
+    chart_raw = payload.get("size_chart")
+    return {
+        "name": payload.get("product_name") or payload.get("product") or "Your item",
+        "brand": payload.get("brand") or "",
+        "category": payload.get("category") or "",
+        "price": payload.get("price"),
+        "size_chart": _parse_size_chart_text(chart_raw),
+        "size_chart_submitted": bool(
+            chart_raw if not isinstance(chart_raw, dict) else chart_raw
+        ),
+        "review_snippets": _review_snippets_from_payload(payload),
+        "save_reason": payload.get("why_saved") or "",
+        "intended_use": intended,
+        "occasion_days_remaining": days,
+        "occasion_timing": payload.get("occasion_timing"),
+        "unresolved_questions": payload.get("unresolved_questions") or "",
+        "comparison_status": payload.get("comparison_status") or "not_comparing",
+        "intent_state": "active",
+        "saved_days_ago": None,
+        "stock_status": None,
+        "usual_size": _usual_size_from_payload(payload),
+        "chest": payload.get("chest"),
+        "waist": payload.get("waist"),
+    }
+
+
+def _custom_fit_evidence(payload: dict, item: dict) -> list[str]:
+    evidence: list[str] = []
+    if item.get("size_chart_submitted") or item.get("size_chart"):
+        evidence.append("Submitted size chart")
+    usual = item.get("usual_size")
+    if usual:
+        evidence.append(f"Usual size {usual}")
+    chest = item.get("chest")
+    if chest:
+        evidence.append(f"Chest measurement: {chest:g} in")
+    waist = item.get("waist")
+    if waist:
+        evidence.append(f"Waist measurement: {waist:g} in")
+    if item.get("review_snippets"):
+        evidence.append("Submitted review snippets")
+    return evidence or ["Submitted fit details"]
+
+
+def compute_custom_analysis_fallback(payload: dict) -> dict:
+    """Deterministic two-panel result from the submitted payload. Not an LLM result."""
+    missing = validate_custom_payload(dict(payload))
+    if missing:
+        return _missing_information_result(payload, missing)
+
+    item = _item_from_custom_payload(payload)
+    usual = str(item.get("usual_size") or "M")
+    chest = item.get("chest")
+    if chest is not None:
+        try:
+            chest = float(chest)
+        except (TypeError, ValueError):
+            chest = None
+    waist = item.get("waist")
+    if waist is not None:
+        try:
+            waist = float(waist)
+        except (TypeError, ValueError):
+            waist = None
+    fit = compute_fit(item, usual, chest, waist)
+    # Validation already passed — do not invent missing chart/reviews/size.
+    decision = compute_next_action(item, fit, gaps=_blocking_check_questions(item))
+    dec_ev = list(decision.get("evidence_used") or [])
+    result = {
+        "fit_recommendation": fit.get("fit_recommendation") or "—",
+        "fit_confidence": fit.get("fit_confidence") or "Low",
+        "fit_reason": fit.get("fit_reason") or "",
+        "fit_evidence_used": _custom_fit_evidence(payload, item),
+        "decision_status": decision.get("decision_status"),
+        "decision_reason": decision.get("decision_reason") or "",
+        "next_step": decision.get("next_step") or "",
+        "decision_evidence_used": dec_ev,
+        "evidence_used": dec_ev,
+        "name": item.get("name") or "Your item",
+        "brand": item.get("brand") or "",
+        "category": item.get("category") or "Custom paste",
+        "price": item.get("price"),
+        "saved_days_ago": None,
+        "stock_status": None,
+        "review_snippets": item.get("review_snippets") or [],
+        "is_live": False,
+        "is_rule_fallback": True,
+        "source_label": RULE_FALLBACK_LABEL,
+        "parse_failed": False,
+        "thin_payload": False,
+        "failure_kind": "rule_fallback",
+        "missing_fields": [],
+    }
+    result = _apply_item_identity(result, payload)
+    result["is_live"] = False
+    result["is_rule_fallback"] = True
+    result["source_label"] = RULE_FALLBACK_LABEL
+    result["failure_kind"] = "rule_fallback"
+    return result
+
+
+def analyse_custom_item(payload: dict, api_key: str | None) -> dict:
+    """Validate the saved payload, then call Groq. Never maps API/parse errors to NMI."""
+    debug = _empty_debug(payload, key_detected=bool(api_key))
+    missing = validate_custom_payload(payload)
+    debug["payload_fields_present"] = payload_fields_present(payload)
+    debug["validation_errors"] = list(missing)
+    debug["groq_key_detected"] = bool(api_key)
+    _record_debug(debug)
+    if missing:
+        return _missing_information_result(payload, missing)
+    if not api_key:
+        return compute_custom_analysis_fallback(payload)
+    try:
+        t0 = time.perf_counter()
+        parsed = call_groq(payload, api_key)
+        debug["api_call_succeeded"] = True
+        debug["json_parse_succeeded"] = True
+        schema_errors = validate_live_schema(parsed)
+        if schema_errors:
+            debug["validation_errors"] = list(missing) + schema_errors
+            _record_debug(debug)
+            return _parse_failed_result(payload)
+        result = normalize_live_result(parsed)
+        result["eval_seconds"] = round(time.perf_counter() - t0, 1)
+        result["is_rule_fallback"] = False
+        _record_debug(debug)
+        return _apply_item_identity(result, payload)
+    except GroqParseError as exc:
+        debug["api_call_succeeded"] = True
+        debug["json_parse_succeeded"] = False
+        _record_debug(debug)
+        _log_adapter_error("Custom analysis response could not be processed", exc)
+        return _parse_failed_result(payload)
+    except GroqAPIError as exc:
+        debug["api_call_succeeded"] = False
+        debug["json_parse_succeeded"] = False
+        _record_debug(debug)
+        _log_adapter_error("Custom analysis API request failed", exc)
+        return compute_custom_analysis_fallback(payload)
+    except Exception as exc:
+        debug["api_call_succeeded"] = False
+        debug["json_parse_succeeded"] = False
+        _record_debug(debug)
+        _log_adapter_error("Custom analysis failed", exc)
+        return compute_custom_analysis_fallback(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -1052,12 +1785,48 @@ def current_view() -> str:
     return view if view in VIEWS else "wishlist"
 
 
-def go(view: str, **extra) -> None:
-    payload = {"view": view}
-    for key, val in extra.items():
-        if val is not None and val != "":
-            payload[key] = str(val)
-    st.query_params.from_dict(payload)
+def query_state_for(view: str, item: str | None = None) -> dict[str, str]:
+    """Canonical in-app query string. Detail always includes item id."""
+    chosen = str(view or "wishlist")
+    if chosen not in VIEWS:
+        chosen = "wishlist"
+    if chosen == "detail":
+        token = str(item or "").strip()
+        if not token:
+            return {"view": "wishlist"}
+        return {"view": "detail", "item": token}
+    return {"view": chosen}
+
+
+def nav_to(view: str, item: str | None = None, **extra) -> None:
+    """Same-tab navigation: set query params, keep session state, rerun.
+
+    Internal pages use Streamlit buttons only. Markdown or HTML anchors would
+    open a new browser tab and a new session.
+    """
+    if item in (None, "") and extra.get("item") not in (None, ""):
+        item = extra.get("item")
+    st.query_params.from_dict(query_state_for(view, item))
+    st.rerun()
+
+
+def nav_button(
+    label: str,
+    view: str,
+    *,
+    key: str,
+    item: str | None = None,
+    type: str = "secondary",
+    use_container_width: bool = True,
+) -> None:
+    """Internal nav control. A Streamlit button, never a new-tab link."""
+    if st.button(
+        label,
+        key=key,
+        type=type,
+        use_container_width=use_container_width,
+    ):
+        nav_to(view, item=item)
 
 
 def inject_css() -> None:
@@ -1303,11 +2072,6 @@ h1, h2, h3 { font-family: Manrope, sans-serif !important; }
   border-radius: 8px; padding: 10px; margin-top: 6px;
   font-size: 13px; font-style: italic; color: #564145;
 }
-.wd-measure {
-  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
-  background: rgba(246,243,242,0.7); border-radius: 8px; padding: 12px; text-align: center;
-}
-.wd-measure .hi { background: rgba(229,226,225,0.6); border-radius: 6px; padding: 4px 0; }
 .wd-check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; margin: 6px 0; }
 .wd-add { display: flex; align-items: center; gap: 10px; font-size: 13px; margin: 8px 0; }
 .wd-add .plus {
@@ -1387,6 +2151,8 @@ def detail_badge(label: str, bg: str, fg: str) -> str:
 
 
 def fit_headline(result: dict) -> str:
+    if result.get("failure_kind") in ("api", "parse"):
+        return result.get("fit_reason") or PARSE_FAILED_MESSAGE
     if result.get("is_live") and verdict_kind(result) == "Needs more information":
         return "Insufficient information to suggest size"
     if (result.get("fit_confidence") or "") == "Low":
@@ -1428,29 +2194,326 @@ def compose_fit_based_on(
     return " • ".join(bits)
 
 
+_INTERNAL_EVIDENCE_FIELDS = (
+    "comparison_status",
+    "intent_state",
+    "save_reason",
+    "occasion_days_remaining",
+    "fit_confidence",
+    "fit_recommendation",
+    "fit_reason",
+    "intended_use",
+    "saved_days_ago",
+    "missing_or_open",
+    "stock_status",
+    "stock_is_simulated",
+    "unresolved_questions",
+    "why_saved",
+)
+_EVIDENCE_FIELD_ALIASES = {
+    "comparison": "comparison_status",
+    "intent": "intent_state",
+    "occasion": "occasion_days_remaining",
+    "timing": "occasion_days_remaining",
+    "fit": "fit_confidence",
+    "confidence": "fit_confidence",
+    "size": "fit_recommendation",
+    "use": "intended_use",
+    "reason": "save_reason",
+    "age": "saved_days_ago",
+    "missing": "missing_or_open",
+}
+_INTERNAL_FIELD_RE = re.compile(
+    r"\b("
+    + "|".join(re.escape(name) for name in _INTERNAL_EVIDENCE_FIELDS)
+    + r")\b",
+    re.I,
+)
+_SNAKE_FIELD_RE = re.compile(r"\b[a-z]+_[a-z]+(?:_[a-z]+)*\s*:")
+
+
+def _ctx_value(ctx: dict, *keys):
+    for key in keys:
+        value = ctx.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _evidence_context(result, item_or_payload) -> dict:
+    ctx: dict = {}
+    for src in (item_or_payload, result):
+        if not isinstance(src, dict):
+            continue
+        for key in (
+            "comparison_status",
+            "intent_state",
+            "occasion_days_remaining",
+            "occasion_timing",
+            "save_reason",
+            "why_saved",
+            "intended_use",
+            "saved_days_ago",
+            "fit_confidence",
+            "fit_recommendation",
+            "fit_reason",
+        ):
+            value = src.get(key)
+            if value not in (None, "") and ctx.get(key) in (None, ""):
+                ctx[key] = value
+    if ctx.get("save_reason") in (None, "") and ctx.get("why_saved") not in (None, ""):
+        ctx["save_reason"] = ctx["why_saved"]
+    if ctx.get("occasion_days_remaining") in (None, ""):
+        days = _parse_occasion(ctx)
+        if days is None:
+            days = _parse_occasion_timing(ctx.get("occasion_timing"))
+        if days is not None:
+            ctx["occasion_days_remaining"] = days
+    return ctx
+
+
+def _is_shopper_safe(text: str) -> bool:
+    blob = str(text or "").strip()
+    if not blob:
+        return False
+    if _INTERNAL_FIELD_RE.search(blob):
+        return False
+    if _SNAKE_FIELD_RE.search(blob):
+        return False
+    lowered = _norm(blob)
+    if re.search(r"\bcomparing\s*[•|,]\s*active\b", lowered):
+        return False
+    if lowered in ("comparing", "not_comparing", "active", "stale", "uncertain"):
+        return False
+    return True
+
+
+def _comparison_phrase(value) -> str:
+    if value in (None, ""):
+        return ""
+    if _is_comparing({"comparison_status": value}):
+        return "You are comparing another shortlisted product."
+    status = _norm(str(value))
+    if status in ("not_comparing", "none", "no") or "not" in status:
+        return "You are not comparing this with another shortlisted product."
+    return ""
+
+
+def _intent_phrase(value) -> str:
+    token = _norm(str(value or ""))
+    if token == "active":
+        return "Your interest in this item is still active."
+    if token == "stale":
+        return (
+            "This item has been saved for a long time and your current "
+            "interest is uncertain."
+        )
+    if token == "uncertain":
+        return "Your current interest in this item is uncertain."
+    return ""
+
+
+def _occasion_phrase(value, ctx: dict) -> str:
+    days = _parse_occasion({"occasion_days_remaining": value})
+    if days is None:
+        days = _parse_occasion_timing(value)
+    if days is None:
+        days = _parse_occasion(ctx) or _parse_occasion_timing(ctx.get("occasion_timing"))
+    if days is None:
+        token = _norm(str(value or ""))
+        if token in ("none", "(none)", "null"):
+            return "There is no dated occasion for this item."
+        return ""
+    unit = "day" if days == 1 else "days"
+    return f"You need this item in approximately {days} {unit}."
+
+
+def _fit_confidence_phrase(value) -> str:
+    token = _norm(str(value or ""))
+    if token == "high":
+        return "Available fit signals are consistent."
+    if token == "medium":
+        return "Available fit signals are reasonably consistent."
+    if token == "low":
+        return "Available fit signals are limited or inconsistent."
+    return ""
+
+
+def _days_saved_phrase(value) -> str:
+    blob = str(value or "")
+    match = re.search(r"-?\d+", blob)
+    if not match:
+        return ""
+    days = int(match.group(0))
+    unit = "day" if days == 1 else "days"
+    return (
+        f"This has been saved for {days} {unit}. "
+        "That age is not a reason to buy."
+    )
+
+
+def _missing_info_phrase(value) -> str:
+    blob = _norm(str(value or ""))
+    if "size_chart" in blob or "size chart is missing" in blob:
+        return "A size chart was not provided."
+    cleaned = _INTERNAL_FIELD_RE.sub("", str(value or "")).strip(" :,-")
+    return cleaned if _is_shopper_safe(cleaned) else ""
+
+
+def _phrase_for_field(field: str, value, ctx: dict) -> str:
+    kn = _norm(str(field or "")).replace(" ", "_")
+    kn = _EVIDENCE_FIELD_ALIASES.get(kn, kn)
+    if kn in ("comparison_status", "comparison"):
+        raw = value if value not in (None, "") else _ctx_value(ctx, "comparison_status")
+        return _comparison_phrase(raw)
+    if kn == "intent_state":
+        raw = value if value not in (None, "") else _ctx_value(ctx, "intent_state")
+        return _intent_phrase(raw)
+    if kn == "occasion_days_remaining":
+        raw = value if value not in (None, "") else _ctx_value(
+            ctx, "occasion_days_remaining", "occasion_timing"
+        )
+        return _occasion_phrase(raw, ctx)
+    if kn == "fit_confidence":
+        raw = value if value not in (None, "") else _ctx_value(ctx, "fit_confidence")
+        return _fit_confidence_phrase(raw)
+    if kn == "fit_recommendation":
+        raw = value if value not in (None, "") else _ctx_value(ctx, "fit_recommendation")
+        size = str(raw or "").strip()
+        if not size or not _is_shopper_safe(size):
+            return ""
+        return f"Suggested size based on available information: {size}."
+    if kn == "fit_reason":
+        text = str(value or "").strip()
+        return text if _is_shopper_safe(text) else ""
+    if kn == "saved_days_ago":
+        raw = value if value not in (None, "") else _ctx_value(ctx, "saved_days_ago")
+        return _days_saved_phrase(raw)
+    if kn == "save_reason":
+        text = str(
+            value if value not in (None, "") else _ctx_value(ctx, "save_reason", "why_saved") or ""
+        ).strip()
+        return text if _is_shopper_safe(text) else ""
+    if kn == "intended_use":
+        text = str(
+            value if value not in (None, "") else _ctx_value(ctx, "intended_use") or ""
+        ).strip()
+        if not text or not _is_shopper_safe(text):
+            return ""
+        return f"You planned this for {text}."
+    if kn == "missing_or_open":
+        return _missing_info_phrase(value)
+    return ""
+
+
+def _phrase_for_value(value, ctx: dict) -> str:
+    token = _norm(str(value or ""))
+    if not token:
+        return ""
+    if token in ("comparing", "not_comparing") or token.startswith("compar"):
+        return _comparison_phrase(value)
+    if token in ("active", "stale", "uncertain"):
+        return _intent_phrase(value)
+    if token in ("high", "medium", "low"):
+        return _fit_confidence_phrase(value)
+    return ""
+
+
+def _translate_evidence_row(row: str, ctx: dict | None = None) -> str:
+    """Turn one internal evidence row into shopper-facing copy."""
+    ctx = ctx or {}
+    text = str(row or "").strip()
+    if not text:
+        return ""
+    key, sep, val = text.partition(":")
+    if sep:
+        field = key.strip()
+        value = val.strip()
+        kn = _norm(field).replace(" ", "_")
+        kn = _EVIDENCE_FIELD_ALIASES.get(kn, kn)
+        phrase = _phrase_for_field(kn, value, ctx)
+        if phrase:
+            return phrase
+        if "_" in field or kn in _INTERNAL_EVIDENCE_FIELDS:
+            fallback = _phrase_for_value(value, ctx)
+            if fallback:
+                return fallback
+            return value if _is_shopper_safe(value) else ""
+        return text if _is_shopper_safe(text) else ""
+
+    kn = _norm(text).replace(" ", "_")
+    if kn in _EVIDENCE_FIELD_ALIASES or kn in _INTERNAL_EVIDENCE_FIELDS:
+        field = _EVIDENCE_FIELD_ALIASES.get(kn, kn)
+        return _phrase_for_field(field, None, ctx)
+    phrase = _phrase_for_value(text, ctx)
+    if phrase:
+        return phrase
+    if re.fullmatch(r"[A-Za-z]+(_[A-Za-z]+)+", text):
+        return ""
+    return text if _is_shopper_safe(text) else ""
+
+
+def format_evidence_for_shopper(row: str, source: dict | None = None) -> str:
+    """Turn engine evidence keys into short customer-facing copy."""
+    return _translate_evidence_row(row, source or {})
+
+
+def _format_evidence_list(rows, ctx: dict) -> list[str]:
+    if not isinstance(rows, list):
+        rows = [rows] if rows else []
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        line = _translate_evidence_row(str(row), ctx)
+        if not line or not _is_shopper_safe(line):
+            continue
+        key = _norm(line)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(line)
+    return out
+
+
+def format_decision_evidence(result, item_or_payload=None) -> list[str]:
+    """Customer-facing decision evidence. Internal keys stay in Python only."""
+    ctx = _evidence_context(result, item_or_payload)
+    rows: list = []
+    if isinstance(result, dict):
+        raw = result.get("decision_evidence_used")
+        if raw in (None, [], ""):
+            raw = result.get("evidence_used")
+        if isinstance(raw, list):
+            rows = list(raw)
+        elif raw:
+            rows = [raw]
+        extra = result.get("supporting_context") or []
+        if isinstance(extra, list):
+            rows.extend(extra)
+    return _format_evidence_list(rows, ctx)
+
+
 def compose_decision_based_on(result: dict) -> str:
-    ev = result.get("decision_evidence_used") or result.get("evidence_used") or []
-    if ev:
-        pretty = []
-        for row in ev[:4]:
-            text = str(row)
-            pretty.append(text.split(": ", 1)[-1] if ": " in text else text)
+    pretty = format_decision_evidence(result, result)[:4]
+    if pretty:
         return " • ".join(pretty)
     return compose_why_line(result)
 
 
 def render_chrome(active: str) -> None:
     if active == "detail":
+        top, _ = st.columns([1.2, 2.2])
+        with top:
+            nav_button(
+                "Back to wishlist",
+                "wishlist",
+                key="chrome_detail_back",
+            )
         md(
             f"""
 <div class="wd-top">
   <div class="wd-compact">
-    <div style="display:flex;align-items:center;gap:8px;min-width:0">
-      <a class="wd-back" href="?view=wishlist">{icon("arrow_back", 22)}</a>
-      <span class="wd-title" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-        Item Assessment Detail
-      </span>
-    </div>
+    <span class="wd-title">Item Assessment Detail</span>
     <div class="wd-brand-right">
       <span class="wd-ai">{icon("auto_awesome", 13)} AI-assisted</span>
       <div class="wd-avatar">{icon("person", 18)}</div>
@@ -1461,8 +2524,6 @@ def render_chrome(active: str) -> None:
         )
         return
 
-    wish_cls = "is-active" if active in ("wishlist",) else ""
-    analyse_cls = "is-active" if active in ("analyse", "live_result") else ""
     md(
         f"""
 <div class="wd-top">
@@ -1480,10 +2541,6 @@ def render_chrome(active: str) -> None:
       <div class="wd-avatar">{icon("person", 18)}</div>
     </div>
   </div>
-  <nav class="wd-nav">
-    <a class="{wish_cls}" href="?view=wishlist">Sample Wishlist</a>
-    <a class="{analyse_cls}" href="?view=analyse">Analyse an Item</a>
-  </nav>
   <div class="wd-proto">
     {icon("info", 15)}
     <span>{html.escape(PROTO_BANNER)}</span>
@@ -1491,6 +2548,23 @@ def render_chrome(active: str) -> None:
 </div>
         """
     )
+    wish_type = "primary" if active in ("wishlist",) else "secondary"
+    analyse_type = "primary" if active in ("analyse", "live_result") else "secondary"
+    c_wish, c_analyse = st.columns(2)
+    with c_wish:
+        nav_button(
+            "Sample Wishlist",
+            "wishlist",
+            type=wish_type,
+            key="nav_wishlist",
+        )
+    with c_analyse:
+        nav_button(
+            "Analyse an Item",
+            "analyse",
+            type=analyse_type,
+            key="nav_analyse",
+        )
 
 
 def wishlist_health_counts(rows: list[dict]) -> tuple[int, int, int, int]:
@@ -1518,10 +2592,84 @@ def _chart_dim(size_chart: dict, size: str) -> tuple[str | None, float | None]:
     return None, None
 
 
+def _inches_label(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value:g} in"
+
+
+def _size_with_inches(size: str | None, inches: float | None) -> str:
+    token = str(size or "").strip()
+    if not token:
+        return "—"
+    if inches is None:
+        return token
+    return f"{token} — {_inches_label(inches)}"
+
+
+def measurement_evidence_rows(
+    item: dict,
+    usual: str,
+    chest: float | None,
+    waist: float | None,
+) -> list[tuple[str, str]]:
+    """Plain-text measurement comparison for the detail page. No HTML."""
+    chart = item.get("size_chart") or {}
+    rec = str(item.get("fit_recommendation") or "").strip()
+    has_chest = any(
+        isinstance(dims, dict) and any(key in dims for key in ("chest", "bust"))
+        for dims in chart.values()
+    )
+    has_waist = any(
+        isinstance(dims, dict) and "waist" in dims for dims in chart.values()
+    )
+    if has_chest and chest is not None:
+        closest_size, _diff, _dim = _closest_chart_size(chart, chest, None)
+        profile_val = chest
+    elif has_waist and waist is not None:
+        closest_size, _diff, _dim = _closest_chart_size(chart, None, waist)
+        profile_val = waist
+    else:
+        closest_size, _diff, closest_dim = _closest_chart_size(chart, chest, waist)
+        if closest_dim == "waist":
+            profile_val = waist if waist is not None else chest
+        else:
+            profile_val = chest if chest is not None else waist
+    if not closest_size:
+        mapped = _usual_on_chart(usual, chart) if usual else ""
+        closest_size = mapped or None
+    closest_val = _chart_dim(chart, closest_size)[1] if closest_size else None
+    rec_val = _chart_dim(chart, rec)[1] if rec else None
+    return [
+        ("Your profile", _inches_label(profile_val)),
+        ("Closest chart size", _size_with_inches(closest_size, closest_val)),
+        ("Suggested size", _size_with_inches(rec, rec_val)),
+    ]
+
+
+def render_measurement_evidence(rows: list[tuple[str, str]]) -> None:
+    if not rows:
+        return
+    with st.container():
+        cols = st.columns(3)
+        for col, (label, value) in zip(cols, rows):
+            with col:
+                st.caption(label)
+                st.markdown(value)
+
+
+def render_plain_bullets(items: list, *, empty: str | None = None) -> None:
+    cleaned = [str(item).strip() for item in items if str(item).strip()]
+    if not cleaned:
+        if empty:
+            st.caption(empty)
+        return
+    st.markdown("\n".join(f"- {item}" for item in cleaned))
+
+
 def render_item_card(
     row: dict, usual: str, chest: float | None, waist: float | None
 ) -> None:
-    item_id = html.escape(str(row.get("id") or "item"))
     conf = row.get("fit_confidence") or "Low"
     status = verdict_kind(row)
     img = item_image(row)
@@ -1588,12 +2736,25 @@ def render_item_card(
   </div>
   <div class="wd-fit-note"><strong style="color:#1c1b1b">Fit note:</strong> {html.escape(FIT_NOTE)}</div>
 </article>
-<div class="wd-footer">
-  <a href="?view=detail&amp;item={item_id}">{icon("edit_note", 16)} Update context</a>
-  <a class="strong" href="?view=detail&amp;item={item_id}">{icon("visibility", 16)} View evidence</a>
-</div>
         """
     )
+    raw_id = str(row.get("id") or "item")
+    f1, f2 = st.columns(2)
+    with f1:
+        nav_button(
+            "Update context",
+            "detail",
+            item=raw_id,
+            key=f"upd_{raw_id}",
+        )
+    with f2:
+        nav_button(
+            "View evidence",
+            "detail",
+            item=raw_id,
+            type="primary",
+            key=f"ev_{raw_id}",
+        )
 
 
 def render_how_it_works() -> None:
@@ -1609,10 +2770,80 @@ def render_how_it_works() -> None:
 
 def reset_state() -> None:
     st.session_state.reset_nonce = st.session_state.get("reset_nonce", 0) + 1
-    st.session_state.analyse_nonce = st.session_state.get("analyse_nonce", 0) + 1
+    _clear_custom_analysis(clear_form=True)
+
+
+def _clear_custom_analysis(*, clear_form: bool) -> None:
+    st.session_state.pop("custom_analysis_result", None)
     st.session_state.pop("live_result", None)
     st.session_state.pop("live_error", None)
-    st.session_state.pop("analyse_payload", None)
+    if clear_form:
+        st.session_state.pop("custom_analysis_debug", None)
+        st.session_state.pop("custom_analysis_payload", None)
+        st.session_state.pop("analyse_payload", None)
+        st.session_state.analyse_nonce = st.session_state.get("analyse_nonce", 0) + 1
+
+
+def _saved_custom_payload() -> dict:
+    payload = st.session_state.get("custom_analysis_payload")
+    if isinstance(payload, dict):
+        return payload
+    legacy = st.session_state.get("analyse_payload")
+    return legacy if isinstance(legacy, dict) else {}
+
+
+def _saved_custom_result() -> dict | None:
+    result = st.session_state.get("custom_analysis_result")
+    if isinstance(result, dict):
+        return result
+    legacy = st.session_state.get("live_result")
+    return legacy if isinstance(legacy, dict) else None
+
+
+def _ensure_custom_form_state(nonce: int) -> None:
+    """Restore form widgets from the saved payload after navigation/reruns."""
+    if f"ca_chest_{nonce}" not in st.session_state:
+        st.session_state[f"ca_chest_{nonce}"] = 0.0
+    if f"ca_waist_{nonce}" not in st.session_state:
+        st.session_state[f"ca_waist_{nonce}"] = 0.0
+    payload = _saved_custom_payload()
+    if not payload:
+        return
+    unsure_raw = payload.get("unresolved_questions")
+    if isinstance(unsure_raw, str) and unsure_raw:
+        chips = [c.strip() for c in unsure_raw.split(",") if c.strip() in UNCERTAINTY_CHIPS]
+    elif isinstance(unsure_raw, list):
+        chips = [c for c in unsure_raw if c in UNCERTAINTY_CHIPS]
+    else:
+        chips = []
+    occasion_for = payload.get("occasion_for")
+    defaults = {
+        f"ca_prod_name_{nonce}": payload.get("product_name") or "",
+        f"ca_brand_{nonce}": payload.get("brand") or "",
+        f"ca_price_{nonce}": payload.get("price") or "",
+        f"ca_size_chart_{nonce}": payload.get("size_chart") or "",
+        f"ca_reviews_{nonce}": payload.get("reviews") or "",
+        f"ca_availability_{nonce}": payload.get("availability") or "",
+        f"ca_chest_{nonce}": float(payload["chest"]) if payload.get("chest") else 0.0,
+        f"ca_waist_{nonce}": float(payload["waist"]) if payload.get("waist") else 0.0,
+        f"ca_save_reason_{nonce}": payload.get("why_saved") or "",
+        f"ca_occasion_{nonce}": (
+            "Yes" if occasion_for not in (None, "No specific occasion") else "No"
+        ),
+        f"ca_timeline_{nonce}": payload.get("occasion_timing") or "",
+        f"ca_unsure_{nonce}": chips,
+        f"ca_comparing_{nonce}": (
+            "Yes" if payload.get("comparison_status") == "comparing" else "No"
+        ),
+        f"ca_extra_{nonce}": payload.get("extra_context") or "",
+    }
+    if payload.get("category") in ANALYSE_CATEGORIES:
+        defaults[f"ca_category_{nonce}"] = payload["category"]
+    if payload.get("usual_size") in LETTER_SIZES:
+        defaults[f"ca_usual_{nonce}"] = payload["usual_size"]
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
 
 def _ordered_items(items: list[dict]) -> list[dict]:
@@ -1672,8 +2903,7 @@ def _profile_inputs(nonce: int) -> tuple[str, float | None, float | None]:
     with b2:
         if st.button("Reset", use_container_width=True, key=f"reset_demo_{nonce}"):
             reset_state()
-            go("wishlist")
-            st.rerun()
+            nav_to("wishlist")
     with b3:
         st.caption("Used only for this session.")
     return usual_size, (chest_raw if chest_raw > 0 else None), (
@@ -1749,11 +2979,6 @@ def _demo_rows_by_id(usual: str, chest: float | None, waist: float | None) -> di
 
 
 def render_detail_page(nonce: int) -> None:
-    md(
-        f'<div style="padding:0.5rem 0 0.75rem">'
-        f'<a class="wd-back" href="?view=wishlist">{icon("arrow_back", 16)} Back to wishlist</a>'
-        f"</div>"
-    )
     item_id = st.query_params.get("item", "")
     if isinstance(item_id, list):
         item_id = item_id[0] if item_id else ""
@@ -1785,53 +3010,8 @@ def render_detail_page(nonce: int) -> None:
         occasion_label = str(row.get("save_reason") or "No specific occasion")
     questions = row.get("unresolved_questions") or []
     uncertain = questions[0] if questions else "Nothing specific noted"
-    rec = str(row.get("fit_recommendation") or "")
-    usual_dim, usual_val = _chart_dim(row.get("size_chart") or {}, _usual_on_chart(usual, row.get("size_chart") or {}))
-    rec_dim, rec_val = _chart_dim(row.get("size_chart") or {}, rec)
-    dim_label = {"chest": "chest", "bust": "bust", "waist": "waist"}.get(rec_dim or usual_dim or "", "in")
-    profile_val = chest if dim_label != "waist" else waist
-    if profile_val is None:
-        profile_val = chest or waist
     snippets = row.get("review_snippets") or []
-    quotes = (
-        '<span class="wd-muted" style="letter-spacing:0.06em;text-transform:uppercase;'
-        'display:block;margin-top:8px">Simulated review snippets</span>'
-        + "".join(
-            f'<div class="wd-quote">{icon("chat_bubble_outline", 16)}'
-            f'<span>“{html.escape(str(s))}”</span></div>'
-            for s in snippets[:3]
-        )
-    )
-    evidence_rows = row.get("decision_evidence_used") or row.get("evidence_used") or []
-    checks = "".join(
-        f'<div class="wd-check">{icon("check_circle", 16)}'
-        f"<span>{html.escape(str(e))}</span></div>"
-        for e in evidence_rows[:6]
-    )
-    if row.get("supporting_context"):
-        for extra in row["supporting_context"]:
-            checks += (
-                f'<div class="wd-check">{icon("check_circle", 16)}'
-                f"<span>{html.escape(str(extra))}</span></div>"
-            )
-    measure = ""
-    if profile_val or usual_val or rec_val:
-        measure = f"""
-        <div class="wd-measure">
-          <div>
-            <div class="wd-muted">Your profile</div>
-            <div class="wd-price">{html.escape(f"{profile_val:g} in" if profile_val else "—")}</div>
-          </div>
-          <div>
-            <div class="wd-muted">Size {html.escape(str(_usual_on_chart(usual, row.get("size_chart") or {})))} chart</div>
-            <div class="wd-price">{html.escape(f"{usual_val:g} in" if usual_val else "—")}</div>
-          </div>
-          <div class="hi">
-            <div class="wd-muted" style="color:#6c0029;font-weight:600">Size {html.escape(rec or "—")} chart</div>
-            <div class="wd-price" style="color:#6c0029">{html.escape(f"{rec_val:g} in" if rec_val else "—")}</div>
-          </div>
-        </div>
-        """
+    measure_rows = measurement_evidence_rows(row, str(usual), chest, waist)
     md(
         f"""
 <div class="wd-card xl">
@@ -1888,11 +3068,18 @@ def render_detail_page(nonce: int) -> None:
     <div class="wd-avatar" style="background:rgba(108,0,41,0.08);color:#6c0029">{icon("straighten", 22)}</div>
   </div>
   <p class="wd-lead" style="margin:12px 0">{html.escape(row.get("fit_reason") or "")}</p>
-  <div class="wd-panel-label" style="margin:8px 0">{icon("fact_check", 15)} Evidence used</div>
-  {measure}
-  {quotes}
-  <p class="wd-muted" style="margin-top:12px">{icon("info", 15)} <strong>Fit note:</strong> {html.escape(FIT_NOTE)}</p>
 </div>
+        """
+    )
+    st.caption("Evidence used")
+    render_measurement_evidence(measure_rows)
+    if snippets:
+        st.caption("Simulated review snippets")
+        for snippet in snippets[:3]:
+            st.markdown(f"“{snippet}”")
+    st.caption(f"Fit note: {FIT_NOTE}")
+    md(
+        f"""
 <div class="wd-card xl">
   <div class="wd-panel-top" style="margin-bottom:8px">
     <span class="wd-name" style="margin:0">Panel 2 — Buy or Wait?</span>
@@ -1907,27 +3094,65 @@ def render_detail_page(nonce: int) -> None:
         <div style="font-weight:600">{html.escape(row.get("next_step") or decision_headline(row))}</div>
       </div>
     </div>
-    <div class="wd-panel-label">{icon("checklist", 15)} Based on</div>
-    {checks}
   </div>
 </div>
         """
     )
-    if st.button("Change my answers", use_container_width=True, key="detail_change"):
-        go("wishlist")
-        st.rerun()
+    st.caption("Based on")
+    render_plain_bullets(format_decision_evidence(row, row)[:6])
+    nav_button(
+        "Change my answers",
+        "wishlist",
+        key="detail_change",
+    )
     with st.expander("View sizing chart details"):
         chart = row.get("size_chart") or {}
         if not chart:
             st.caption("No size chart on this sample item.")
         else:
             for size, dims in chart.items():
-                st.write(f"**{size}** — {dims}")
+                if isinstance(dims, dict):
+                    parts = ", ".join(f"{key} {val}" for key, val in dims.items())
+                else:
+                    parts = str(dims)
+                st.markdown(f"**{size}** — {parts}")
     render_how_it_works()
+
+
+def render_adapter_debug() -> None:
+    """Development-only diagnostics. Hidden when DEBUG_MODE is False."""
+    if not DEBUG_MODE:
+        return
+    dbg = {}
+    try:
+        dbg = dict(st.session_state.get("custom_analysis_debug") or {})
+    except Exception:
+        dbg = {}
+    present = dbg.get("payload_fields_present")
+    if not isinstance(present, dict):
+        present = payload_fields_present(_saved_custom_payload())
+    errors = dbg.get("validation_errors")
+    if not isinstance(errors, list):
+        errors = []
+    key_detected = dbg.get("groq_key_detected")
+    if key_detected is None:
+        key_detected = groq_key_detected()
+    with st.expander("Developer diagnostics", expanded=True):
+        st.caption("Booleans and error codes only. No personal inputs. No API key.")
+        st.write("Payload fields present")
+        st.json({key: bool(present.get(key)) for key in CUSTOM_PAYLOAD_FIELDS})
+        st.write("Validation errors:", [str(item) for item in errors])
+        st.write("Groq key detected:", bool(key_detected))
+        st.write("API call succeeded:", bool(dbg.get("api_call_succeeded")))
+        st.write("JSON parsing succeeded:", bool(dbg.get("json_parse_succeeded")))
 
 
 def render_analyse_page(api_key: str | None) -> None:
     nonce = st.session_state.get("analyse_nonce", 0)
+    _ensure_custom_form_state(nonce)
+    if not api_key:
+        st.warning(SECRET_MISSING_MESSAGE)
+    render_adapter_debug()
     md(
         f"""
 <div class="wd-kicker">{icon("fact_check", 14)} Structured Evaluation</div>
@@ -1948,32 +3173,48 @@ def render_analyse_page(api_key: str | None) -> None:
 </div>
         """
     )
-    with st.form(f"analyse_form_{nonce}"):
-        prod_name = st.text_input("Product Name *", placeholder="e.g. Cotton Relaxed Cuban Collar Shirt")
+    with st.form(f"analyse_form_{nonce}", clear_on_submit=False):
+        prod_name = st.text_input(
+            "Product Name *",
+            placeholder="e.g. Cotton Relaxed Cuban Collar Shirt",
+            key=f"ca_prod_name_{nonce}",
+        )
         c1, c2 = st.columns(2)
         with c1:
-            brand = st.text_input("Brand (optional)", placeholder="e.g. Netplay, Marks & Spencer")
+            brand = st.text_input(
+                "Brand (optional)",
+                placeholder="e.g. Netplay, Marks & Spencer",
+                key=f"ca_brand_{nonce}",
+            )
         with c2:
             category = st.selectbox(
                 "Category *",
                 ANALYSE_CATEGORIES,
                 index=None,
                 placeholder="Select category",
+                key=f"ca_category_{nonce}",
             )
-        price = st.text_input("Current Price (optional)", placeholder="1899")
+        price = st.text_input(
+            "Current Price (optional)",
+            placeholder="1899",
+            key=f"ca_price_{nonce}",
+        )
         size_chart = st.text_area(
             "Size Chart / Exact Specs",
             placeholder="Paste measurement table or key sizing specs e.g. M: Chest 38, L: Chest 40...",
             height=80,
+            key=f"ca_size_chart_{nonce}",
         )
         reviews = st.text_area(
             "Review Snippets & User Feedback",
             placeholder="Paste relevant review comments mentioning fit, cut, fabric, or sizing...",
             height=80,
+            key=f"ca_reviews_{nonce}",
         )
         availability = st.text_input(
             "Availability Notes (optional)",
             placeholder="e.g. Only size L was listed in stock this morning",
+            key=f"ca_availability_{nonce}",
         )
         st.caption(
             "Only enter availability notes for reference. The assistant will "
@@ -1981,19 +3222,7 @@ def render_analyse_page(api_key: str | None) -> None:
             "verified live inventory."
         )
 
-        md(
-            f"""
-<div class="wd-card xl" style="margin:1rem 0 0.35rem">
-  <div class="wd-section-head">
-    <div class="wd-num">2</div>
-    <div>
-      <div class="wd-name" style="margin:0">Your Decision Context</div>
-      <p class="wd-muted" style="margin:0">Your baseline fit, wear rationale, and underlying hesitation</p>
-    </div>
-  </div>
-</div>
-            """
-        )
+        st.caption("2 — Your decision context: baseline fit, why you saved it, and what is still uncertain.")
         s1, s2, s3 = st.columns(3)
         with s1:
             usual = st.selectbox(
@@ -2001,174 +3230,139 @@ def render_analyse_page(api_key: str | None) -> None:
                 LETTER_SIZES,
                 index=None,
                 placeholder="Size",
+                key=f"ca_usual_{nonce}",
             )
         with s2:
-            chest_in = st.number_input("Chest / Bust (in)", min_value=0.0, max_value=60.0, value=0.0, step=0.5)
+            chest_in = st.number_input(
+                "Chest / Bust (in)",
+                min_value=0.0,
+                max_value=60.0,
+                step=0.5,
+                key=f"ca_chest_{nonce}",
+            )
         with s3:
-            waist_in = st.number_input("Waist (in)", min_value=0.0, max_value=60.0, value=0.0, step=0.5)
+            waist_in = st.number_input(
+                "Waist (in)",
+                min_value=0.0,
+                max_value=60.0,
+                step=0.5,
+                key=f"ca_waist_{nonce}",
+            )
         save_reason = st.text_area(
             "Why did you save this item?",
             placeholder="e.g. Trying to replace a faded linen shirt, loved the neutral shade...",
             height=70,
+            key=f"ca_save_reason_{nonce}",
         )
         o1, o2 = st.columns(2)
         with o1:
-            occasion = st.radio("Is it for a particular occasion?", ["No", "Yes"], horizontal=True)
+            occasion = st.radio(
+                "Is it for a particular occasion?",
+                ["No", "Yes"],
+                horizontal=True,
+                key=f"ca_occasion_{nonce}",
+            )
         with o2:
-            timeline = st.text_input("When do you need it? (optional)", placeholder="e.g. 10 days, next week, or no date")
+            timeline = st.text_input(
+                "When do you need it? (optional)",
+                placeholder="e.g. 10 days, next week, or no date",
+                key=f"ca_timeline_{nonce}",
+            )
         unsure = st.multiselect(
             "What are you still unsure about?",
             UNCERTAINTY_CHIPS,
             help="Select all areas you want evaluated directly",
+            key=f"ca_unsure_{nonce}",
         )
-        comparing = st.radio("Are you comparing another product?", ["No", "Yes"], horizontal=True)
+        comparing = st.radio(
+            "Are you comparing another product?",
+            ["No", "Yes"],
+            horizontal=True,
+            key=f"ca_comparing_{nonce}",
+        )
         extra = st.text_area(
             "Additional context (optional)",
             placeholder="Any specific laundry concerns, fabric sensitivity, or matching pieces already in wardrobe...",
             height=70,
+            key=f"ca_extra_{nonce}",
         )
-        md(
-            f"""
-<div class="wd-callout">
-  {icon("policy", 22)}
-  <div>
-    <div class="wd-policy-kicker">Verification Policy</div>
-    <p style="margin:4px 0 0;font-size:13px;line-height:20px">
-      If essential information is missing, the assistant will ask you to verify it instead of making a confident recommendation.
-      <span class="wd-muted" style="display:block;margin-top:4px"><strong style="color:#1c1b1b">Fit note:</strong> {html.escape(FIT_NOTE)}</span>
-    </p>
-  </div>
-</div>
-            """
+        st.info(
+            "If essential information is missing, the assistant will ask you to "
+            "verify it instead of making a confident recommendation. "
+            + FIT_NOTE
         )
-        submitted = st.form_submit_button("Analyse this item", type="primary", use_container_width=True)
+        submitted = st.form_submit_button(
+            "Analyse this item", type="primary", use_container_width=True
+        )
 
     c_clear, _ = st.columns([1, 2])
     with c_clear:
         if st.button("Clear form", use_container_width=True, key=f"clear_analyse_{nonce}"):
-            st.session_state.analyse_nonce = nonce + 1
-            st.session_state.pop("live_result", None)
-            st.session_state.pop("live_error", None)
-            st.session_state.pop("analyse_payload", None)
-            go("analyse")
-            st.rerun()
+            _clear_custom_analysis(clear_form=True)
+            nav_to("analyse")
 
     if not submitted:
-        if st.session_state.get("live_error"):
-            st.error(st.session_state.live_error)
-        return
-    if not str(prod_name or "").strip():
-        st.warning("Add a product name so we know which saved item you mean.")
-        return
-    if not str(category or "").strip():
-        st.warning("Select a category.")
-        return
-    if not str(usual or "").strip():
-        st.warning("Select your usual size.")
-        return
-    if not api_key:
-        st.info(
-            "Analyse an Item needs a Groq API key. Sample Wishlist works without one — "
-            "or add `GROQ_API_KEY` in the app’s Streamlit secrets."
-        )
         return
 
-    size_bits = [f"Usual {usual.strip()}"]
-    if chest_in and chest_in > 0:
-        size_bits.append(f"chest {chest_in:g} in")
-    if waist_in and waist_in > 0:
-        size_bits.append(f"waist {waist_in:g} in")
-    chips = list(unsure or [])
-    if "Nothing specific" in chips and len(chips) > 1:
-        chips = ["Nothing specific"]
-    payload = {
-        "product": " ".join(p for p in (prod_name.strip(), brand.strip()) if p),
-        "product_name": prod_name.strip(),
-        "brand": brand.strip(),
-        "category": category.strip(),
-        "price": price.strip(),
-        "why_saved": save_reason.strip(),
-        "occasion_for": (
-            save_reason.strip() or "Yes"
-            if occasion == "Yes"
-            else "No specific occasion"
-        ),
-        "occasion_timing": timeline.strip(),
-        "unresolved_questions": ", ".join(chips),
-        "comparison_status": "comparing" if comparing == "Yes" else "not_comparing",
-        "size_info": ", ".join(size_bits),
-        "size_chart": size_chart.strip(),
-        "reviews": reviews.strip(),
-        "availability": availability.strip(),
-        "extra_context": extra.strip(),
-    }
-    st.session_state.analyse_payload = payload
-    if _live_payload_too_thin(payload):
-        result = _live_fallback_result(
-            "There is not enough size or review information to make a responsible recommendation."
+    payload = build_custom_analysis_payload(
+        prod_name=prod_name,
+        brand=brand,
+        category=category,
+        price=price,
+        size_chart=size_chart,
+        reviews=reviews,
+        availability=availability,
+        usual=usual,
+        chest_in=chest_in,
+        waist_in=waist_in,
+        save_reason=save_reason,
+        occasion=occasion,
+        timeline=timeline,
+        unsure=unsure,
+        comparing=comparing,
+        extra=extra,
+    )
+    st.session_state["custom_analysis_payload"] = payload
+    missing = validate_custom_payload(st.session_state["custom_analysis_payload"])
+    _record_debug(
+        {
+            **_empty_debug(
+                st.session_state["custom_analysis_payload"],
+                key_detected=bool(api_key),
+            ),
+            "validation_errors": list(missing),
+        }
+    )
+    if missing:
+        result = _missing_information_result(
+            st.session_state["custom_analysis_payload"], missing
         )
-        result["name"] = prod_name.strip()
-        result["brand"] = brand.strip()
-        result["category"] = category.strip()
-        result["price"] = price.strip() or None
-        st.session_state.live_result = result
-        st.session_state.live_error = None
-        go("live_result")
-        st.rerun()
+        st.session_state["custom_analysis_result"] = result
+        nav_to("live_result")
         return
     try:
-        t0 = time.perf_counter()
-        parsed = call_groq(payload, api_key)
-        result = normalize_live_result(parsed)
-        result["eval_seconds"] = round(time.perf_counter() - t0, 1)
-        result["name"] = prod_name.strip()
-        result["brand"] = brand.strip()
-        result["category"] = category.strip()
-        result["price"] = price.strip() or None
-        st.session_state.live_result = result
-        st.session_state.live_error = None
-        go("live_result")
-        st.rerun()
-    except Exception:
-        st.session_state.live_result = None
-        st.session_state.live_error = (
-            "Could not get a live decision just now. Check the API key "
-            "and try again — or use Sample Wishlist, which works without a key."
+        result = analyse_custom_item(
+            st.session_state["custom_analysis_payload"], api_key
         )
-        st.error(st.session_state.live_error)
-
-
-def render_live_result_page() -> None:
-    if st.session_state.get("live_error"):
-        st.error(st.session_state.live_error)
-        if st.button("Back to form", type="primary"):
-            go("analyse")
-            st.rerun()
-        return
-    result = st.session_state.get("live_result")
-    if not result:
-        go("analyse")
-        st.rerun()
-        return
-
-    status = verdict_kind(result)
-    conf = result.get("fit_confidence") or "Low"
-    insufficient = status == "Needs more information"
-
-    if insufficient:
-        adds = [
-            "Add a size chart",
-            "Add one or more review snippets",
-            "Provide a measurement or usual size",
-        ]
-        extra = result.get("next_step") or ""
-        add_html = "".join(
-            f'<div class="wd-add"><span class="plus">{icon("add", 13)}</span>'
-            f"<span>{html.escape(a)}</span></div>"
-            for a in adds
+    except Exception as exc:
+        _log_adapter_error("Custom analysis failed", exc)
+        result = compute_custom_analysis_fallback(
+            st.session_state["custom_analysis_payload"]
         )
-        md(
-            f"""
+    st.session_state["custom_analysis_result"] = result
+    nav_to("live_result")
+
+
+def _render_live_notice_panels(
+    *,
+    headline: str,
+    lead: str,
+    panel2_badge: str,
+    panel2_lead: str,
+    steps: list[str],
+) -> None:
+    md(
+        f"""
 <div class="wd-card xl">
   <div class="wd-panel-top">
     <div style="display:flex;align-items:center;gap:6px">
@@ -2179,9 +3373,9 @@ def render_live_result_page() -> None:
   </div>
   <div class="wd-panel" style="margin:10px 0">
     <span class="wd-size-cap">Suggested size based on available information</span>
-    <div class="wd-h1" style="margin:4px 0 0">Insufficient information to suggest size</div>
+    <div class="wd-h1" style="margin:4px 0 0">{html.escape(headline)}</div>
   </div>
-  <p class="wd-lead">{html.escape(compose_why_line(result) or extra)}</p>
+  <p class="wd-lead">{html.escape(lead)}</p>
   <div class="wd-fit-note"><strong style="color:#1c1b1b">Fit note:</strong> {html.escape(FIT_NOTE)}</div>
 </div>
 <div class="wd-card xl">
@@ -2190,51 +3384,119 @@ def render_live_result_page() -> None:
       {icon("flag_circle", 20)}
       <span class="wd-name" style="margin:0">Panel 2 — Buy or Wait?</span>
     </div>
-    {detail_badge("Needs more information", "#EEF0F3", "#596273")}
+    {detail_badge(panel2_badge, "#EEF0F3", "#596273")}
   </div>
-  <p class="wd-lead">Wait before buying until essential sizing or customer feedback signals can be verified.</p>
-  <div class="wd-panel" style="margin-bottom:12px">
-    <div class="wd-panel-label">Concrete Next Steps</div>
-    {add_html}
-  </div>
+  <p class="wd-lead">{html.escape(panel2_lead)}</p>
 </div>
-            """
+        """
+    )
+    st.caption("Concrete Next Steps")
+    render_plain_bullets(steps)
+
+
+def render_live_result_page() -> None:
+    render_adapter_debug()
+    result = _saved_custom_result()
+    if not result:
+        nav_to("analyse")
+        return
+    payload = _saved_custom_payload()
+    kind = result.get("failure_kind")
+
+    if kind in ("api", "no_secret"):
+        message = (
+            SECRET_MISSING_MESSAGE if kind == "no_secret" else API_UNAVAILABLE_MESSAGE
         )
-        if st.button("Provide missing item details", type="primary", use_container_width=True):
+        _render_live_notice_panels(
+            headline=message,
+            lead=message,
+            panel2_badge="Try again",
+            panel2_lead=message,
+            steps=["Please try again"],
+        )
+        if st.button("Try analyse again", type="primary", use_container_width=True):
+            st.session_state.pop("custom_analysis_result", None)
             st.session_state.pop("live_result", None)
-            go("analyse")
-            st.rerun()
-        st.caption("Our algorithm refuses guesswork to protect you from unnecessary returns.")
+            nav_to("analyse")
         return
 
-    payload = st.session_state.get("analyse_payload") or {}
+    if kind == "parse":
+        _render_live_notice_panels(
+            headline=PARSE_FAILED_MESSAGE,
+            lead=PARSE_FAILED_MESSAGE,
+            panel2_badge="Try again",
+            panel2_lead=PARSE_FAILED_MESSAGE,
+            steps=["Please try again"],
+        )
+        if st.button("Try analyse again", type="primary", use_container_width=True):
+            st.session_state.pop("custom_analysis_result", None)
+            st.session_state.pop("live_result", None)
+            nav_to("analyse")
+        return
+
+    status = verdict_kind(result)
+    conf = result.get("fit_confidence") or "Low"
+    insufficient = (
+        not result.get("is_rule_fallback")
+        and (status == "Needs more information" or kind == "missing_information")
+    )
+
+    if insufficient:
+        adds = live_next_steps(payload, result)
+        _render_live_notice_panels(
+            headline="Insufficient information to suggest size",
+            lead=compose_why_line(result) or (result.get("next_step") or ""),
+            panel2_badge="Needs more information",
+            panel2_lead=(
+                "Wait before buying until essential sizing or customer feedback "
+                "signals can be verified."
+            ),
+            steps=adds,
+        )
+        cta = (
+            "Provide missing item details"
+            if any(
+                "product name" in s.lower()
+                or "category" in s.lower()
+                or "usual size" in s.lower()
+                or "fit evidence" in s.lower()
+                or s.startswith("Add ")
+                or s.startswith("Provide ")
+                for s in adds
+            )
+            else "Edit my information"
+        )
+        if st.button(cta, type="primary", use_container_width=True):
+            st.session_state.pop("custom_analysis_result", None)
+            st.session_state.pop("live_result", None)
+            nav_to("analyse")
+        st.caption("The assistant will not invent product details you did not provide.")
+        return
+
     name = result.get("name") or payload.get("product_name") or "Your item"
     brand = result.get("brand") or payload.get("brand") or ""
     category = result.get("category") or payload.get("category") or ""
     price = result.get("price") or payload.get("price") or ""
     subtitle_bits = [x for x in (name, brand, category, f"₹{price}" if price else "") if x]
     elapsed = result.get("eval_seconds")
-    elapsed_l = f"Evaluated in {elapsed}s" if elapsed is not None else "Analysis ready"
+    if result.get("is_rule_fallback"):
+        elapsed_l = RULE_FALLBACK_LABEL
+        ready_label = RULE_FALLBACK_LABEL
+        ready_bg, ready_fg = "#EEF0F3", "#596273"
+    else:
+        elapsed_l = f"Evaluated in {elapsed}s" if elapsed is not None else "Analysis ready"
+        ready_label = "Analysis ready"
+        ready_bg, ready_fg = "#a8f2ce", "#002115"
     fit_ev = result.get("fit_evidence_used") or []
-    dec_ev = result.get("decision_evidence_used") or result.get("evidence_used") or []
-    fit_lis = "".join(
-        f'<div class="wd-check">{icon("check_circle", 16)}<span>{html.escape(str(x))}</span></div>'
-        for x in fit_ev
-    ) or (
-        f'<div class="wd-check">{icon("remove_circle_outline", 16)}'
-        f"<span>No fit evidence listed</span></div>"
-    )
-    dec_lis = "".join(
-        f'<div class="wd-check">{icon("radio_button_checked", 16)}<span>{html.escape(str(x))}</span></div>'
-        for x in dec_ev
-    )
     fit_bg, fit_fg = DETAIL_FIT_BADGE.get(conf, DETAIL_FIT_BADGE["Medium"])
-    dec_bg, dec_fg = DETAIL_DECISION_BADGE.get(status, DETAIL_DECISION_BADGE["Check one thing first"])
+    dec_bg, dec_fg = DETAIL_DECISION_BADGE.get(
+        status, DETAIL_DECISION_BADGE["Check one thing first"]
+    )
     md(
         f"""
 <div class="wd-card xl">
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-    <span class="wd-badge" style="background:#a8f2ce;color:#002115">{icon("check_circle", 14)} Analysis ready</span>
+    <span class="wd-badge" style="background:{ready_bg};color:{ready_fg}">{icon("check_circle", 14)} {html.escape(ready_label)}</span>
     <span class="wd-muted">{html.escape(elapsed_l)}</span>
   </div>
   <div class="wd-item-top">
@@ -2264,9 +3526,16 @@ def render_live_result_page() -> None:
   </div>
   <p class="wd-lead">{html.escape(result.get("fit_reason") or "")}</p>
   <div class="wd-fit-note"><strong style="color:#1c1b1b">Fit note:</strong> {html.escape(FIT_NOTE)}</div>
-  <div class="wd-panel-label">Based on</div>
-  {fit_lis}
 </div>
+        """
+    )
+    st.caption("Based on")
+    render_plain_bullets(
+        _format_evidence_list(fit_ev, _evidence_context(result, payload)),
+        empty="No fit evidence listed",
+    )
+    md(
+        f"""
 <div class="wd-card xl">
   <div class="wd-panel-top">
     <div style="display:flex;align-items:center;gap:6px">
@@ -2283,21 +3552,18 @@ def render_live_result_page() -> None:
       <div style="font-weight:500">{html.escape(result.get("next_step") or decision_headline(result))}</div>
     </div>
   </div>
-  <div class="wd-panel-label">Based on</div>
-  {dec_lis}
 </div>
         """
     )
+    st.caption("Based on")
+    render_plain_bullets(format_decision_evidence(result, payload))
     if st.button("Analyse another item", type="primary", use_container_width=True):
-        st.session_state.analyse_nonce = st.session_state.get("analyse_nonce", 0) + 1
-        st.session_state.pop("live_result", None)
-        st.session_state.pop("analyse_payload", None)
-        go("analyse")
-        st.rerun()
+        _clear_custom_analysis(clear_form=True)
+        nav_to("analyse")
     if st.button("Edit my information", use_container_width=True):
+        st.session_state.pop("custom_analysis_result", None)
         st.session_state.pop("live_result", None)
-        go("analyse")
-        st.rerun()
+        nav_to("analyse")
     render_how_it_works()
 
 
