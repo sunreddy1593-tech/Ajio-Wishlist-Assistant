@@ -48,6 +48,8 @@ A later production system could add other barriers (live inventory, price compar
 9. **Submitted fields are never treated as missing.** Custom analysis validates the saved form payload. Needs more information lists only fields that validation confirmed are absent. API and JSON failures are not converted into missing-information copy.
 10. **Shopper-facing copy.** Internal keys (`comparison_status`, `intent_state`, …) stay in Python. The UI shows translated sentences. Measurement evidence is native Streamlit, not raw HTML tags.
 11. **Same-tab navigation.** In-app views use Streamlit buttons that set `st.query_params` and `st.rerun()`. Markdown / HTML anchors are not used for internal nav (Streamlit would open a new tab).
+12. **Evidence quotes supplied values.** On Analyse an Item, a “Based on” line restates what the shopper actually submitted (*Your chest measurement: 40 inches*), not the label the engine cited (*chest*). A cited signal is **dropped** when that value was never supplied, so a line can restate submitted information but never invent it.
+13. **Submitted input survives a retry and an edit.** Retry re-runs the call on the stored payload without reopening the form. Edit returns to the form with every widget value written back from that payload. Neither path can silently reset a measurement to zero.
 
 ---
 
@@ -151,10 +153,14 @@ comparison, gaps    │  No key / Groq HTTP fail: labelled rule      │
 | **Item detail** | Same engines; shows save context, chart measurements, simulated reviews, evidence |
 | **Live adapter** | Build prompt from **all** custom form fields, one Groq call, strip fences, `json.loads`, schema check. Unknown enums are parse failures, not silent Needs more information |
 | **Rule fallback** | Deterministic `compute_fit` / `compute_next_action` on the submitted payload when Groq is unavailable. Label: *Rule-based fallback — live AI analysis unavailable.* `is_live=False` even after item identity is copied onto the result |
-| **Evidence formatter** | `format_decision_evidence` translates internal engine keys before any shopper-facing list |
+| **Evidence formatter** | `format_decision_evidence` translates internal engine keys before any shopper-facing list (wishlist + detail) |
+| **Custom evidence formatter** | `custom_evidence_lines` rewrites each cited label as a sentence quoting the supplied value — chart row for the suggested size, body measurements, review signals, usual size, occasion timing, price, availability. Drops a label when the value is absent |
+| **Form-state restore** | `_custom_form_values` maps a payload onto the analyse widget keys. `_ensure_custom_form_state` seeds only blanks on a rerun; `restore_custom_form` overwrites, for the return trip from the result page |
 | **Panel renderer** | Fit + next-action panels on wishlist cards, detail, and live result |
 
 Session state is ephemeral (size widgets, analyse form nonce, `custom_analysis_payload` / result). Navigation does not wipe the size profile or the saved analyse payload. Nothing is persisted to disk.
+
+Every analyse-form widget carries an explicit key suffixed with the analyse nonce (`ca_chest_{nonce}`, `ca_reviews_{nonce}`, …). The nonce is what **Clear form** and **Analyse another item** increment to blank the form, so a flat key would defeat clearing. Restoration reads the nonce from session state and runs in the button handler **before** the rerun that rebuilds the form — Streamlit reads session state when a widget is created, so a later write would not reach it.
 
 ---
 
@@ -184,13 +190,17 @@ Seeded items are four **research-backed scenarios**, all labelled fictional / si
 - Required: product name, category, usual size, and **at least one** of size chart, a body measurement, or fit-related reviews. Empty strings and zero measurements become `None` and are not treated as present.
 - Optional: brand, price, size chart, reviews, availability notes (user-reported, not live inventory), measurements, why saved, occasion, timing, open uncertainties, comparison, extra context. Every field is sent to Groq when a call is made.
 - Missing key: analyse page shows *Live AI analysis is unavailable because the deployment secret is not configured.* Submit still runs the **rule-based fallback** on the payload. Sample Wishlist is unaffected.
-- **One** `chat.completions.create` when a key exists: `temperature=0.3`, `max_tokens=700`, no stream, no tools. Model: `openai/gpt-oss-120b`.
-- Model is instructed to return **only** JSON (no markdown). Optional ` ```json ` fences are stripped, then parsed and schema-checked.
-- Three outcomes that must not be collapsed:
-  - **Genuine missing information** → Needs more information, listing only fields validation confirmed are absent.
-  - **Groq / HTTP / missing key** → labelled rule fallback (not Needs more information).
-  - **Unreadable JSON or unknown enums** → *The analysis response could not be processed. Please try again.* (not Needs more information).
-- Failures never show a traceback or the API key. Logs record exception type names only.
+- **One** `chat.completions.create` when a key exists: `temperature=0.2`, `max_tokens=700`, no stream, no tools. Model: `openai/gpt-oss-120b`.
+- The call requests **strict structured output** (`response_format` `json_schema`, name `wishlist_item_analysis`, `ANALYSIS_SCHEMA`), so the model is constrained to the exact keys and enum values instead of being asked politely for them.
+- The prompt still asks for JSON only. Optional ` ```json ` fences are stripped, then parsed and schema-checked, so an endpoint that ignores `response_format` is still handled.
+- Three failure states that must not be collapsed into one another (`failure_kind`):
+  - **`validation_error`** — the submitted payload is genuinely incomplete → Needs more information, listing only fields validation confirmed are absent.
+  - **`processing_error`** — Groq replied but the output could not be parsed or schema-validated → *The analysis response could not be processed. Please try again.* No fit or decision verdict is issued.
+  - **`service_error`** — authentication, network, rate limit, or Groq outage → the labelled rule fallback still renders both panels from the submitted payload, with *Live analysis is temporarily unavailable. Please try again.* shown as a banner above them.
+- Only `validation_error` may tell the shopper that information is missing. Neither `processing_error` nor `service_error` is converted into a Low fit-confidence verdict.
+- A missing key is treated as configuration, not an outage: rule fallback with the secret-missing banner (`fallback_cause = no_secret`).
+- **Recovery from a failure state is two buttons, and neither rebuilds the form.** `retry_saved_analysis()` (primary, *Retry analysis*) calls the adapter again with the stored `custom_analysis_payload` and stays on the result page; with no stored payload it records a `validation_error` result rather than navigating away. `edit_saved_analysis()` (secondary, *Edit my information*) restores the widgets from that payload, clears the stale result, and routes to `view=analyse`.
+- Failures never show a traceback or the API key in the UI. Logs carry a context string, the exception type name, and `exc_info` for diagnosis — tracebacks print source lines, never local values, so the key and the customer payload stay out of the log.
 
 ---
 
@@ -298,7 +308,20 @@ Comparison is evaluated **before** missing-info so an active comparison is the a
 
 The UI maps this onto the same two panels as demo. Unknown `fit_confidence` or `decision_status` values fail schema validation (processing error), not a silent Needs more information fallback.
 
-Shopper-facing evidence lists run through `format_decision_evidence` so engine keys such as `comparison_status: comparing` never appear as raw text.
+Shopper-facing evidence lists run through `format_decision_evidence` (wishlist, detail) or `custom_evidence_lines` (Analyse an Item) so engine keys such as `comparison_status: comparing` never appear as raw text, and JSON-shaped rows are discarded rather than printed.
+
+On the live result the model's own labels are the *selection* of which evidence to show, not the copy itself:
+
+| Cited label | Rendered line (when the value was supplied) |
+| --- | --- |
+| `size chart` | Size M chart measurement: 40 inches |
+| `chest 40 in` | Your chest measurement: 40 inches |
+| `reviews` | One review describes the fit as true to size · One review reports a slightly snug chest |
+| `usual size` | You usually wear size M |
+| `occasion` | The item is needed in seven days |
+| `availability` | You noted: … Availability is treated as simulated, never verified live stock |
+
+Review lines count the matching snippets (*Two reviews describe…*) and name a body part only when a review names one. Rows about what is **absent** keep their existing wording (*A size chart was not provided.*).
 
 ---
 
@@ -339,7 +362,9 @@ Absence of the key is a valid state: Sample Wishlist remains the product; Analys
 - One Groq JSON call when a key is present and the analyse form is submitted
 - Labelled rule-based fallback on the submitted payload when the key is missing or Groq fails
 - Session-only size profile, analyse payload, and live result
-- Automated unittest suite in `tests/test_engines.py`
+- Retry-in-place and restore-the-form recovery from every custom-analysis failure state
+- Evidence lines that restate the shopper's own chart, measurements, reviews, and timing
+- Automated unittest suite in `tests/test_engines.py`, including a regression class for the strict schema, the three failure states, and retry / edit state retention
 - Static research-insight sentence (copy, not a live statistic)
 - Prototype labelling in the banner, stock chips, review captions, and expanders
 
@@ -373,20 +398,23 @@ Four views, one Streamlit page. Body text is ~15px. Statuses always include word
 2. **Sample Wishlist:** research insight, size profile + Reset, health strip, four item cards (two panels, fit note), expander “How this recommendation was generated,” **Update context** / **View evidence** → `view=detail&item=<id>`.
 3. **Item detail:** **Back to wishlist** (same tab), save context, both panels, native measurement evidence (profile / closest chart size / suggested size), simulated review snippets, shopper-facing “Based on” list, optional size-chart expander.
 4. **Analyse an Item:** two-section form in one `st.form` (product information, decision context), verification policy, Clear form. Secret warning when the key is missing.
-5. **Live result:** two panels + translated evidence lists; or Needs more information with **accurate** missing fields; or a processing error; or a labelled rule fallback (never silently shown as live AI).
+5. **Live result:** two panels + evidence lines that quote the submitted values; or Needs more information with **accurate** missing fields; or a processing error; or a labelled rule fallback (never silently shown as live AI). Processing and service failures offer **Retry analysis** (primary) — one more call on the stored payload, staying on the page — and **Edit my information** (secondary), which restores every widget value and returns to the form. Every widget and button on both screens has an explicit key.
 
 ---
 
 ## 13. Failure and safety
 
-| Case | Behaviour |
-| --- | --- |
-| No Groq key | Sample Wishlist works. Analyse shows the secret-missing warning. Submit uses the labelled rule fallback on the payload |
-| Sample JSON missing | Error in the page, no traceback |
-| Groq HTTP / SDK failure | Labelled rule fallback on the submitted payload — not Needs more information |
-| Empty, unreadable, or schema-invalid model JSON | Processing error: *The analysis response could not be processed. Please try again.* — not Needs more information, no traceback |
-| Genuine missing fields | Needs more information listing only fields validation confirmed are absent |
-| Reset / Clear form | Clears size widgets / analyse form nonce and live result; navigation otherwise preserves session payload |
+| Case | `failure_kind` | Behaviour |
+| --- | --- | --- |
+| Genuine missing fields | `validation_error` | Needs more information listing only fields validation confirmed are absent |
+| Empty, unreadable, or schema-invalid model JSON | `processing_error` | *The analysis response could not be processed. Please try again.* — no verdict, not Needs more information, no traceback |
+| Groq auth / network / rate limit / outage | `rule_fallback` with `fallback_cause = service_error` | Rule-based panels from the submitted payload, under a *Live analysis is temporarily unavailable* banner |
+| No Groq key | `rule_fallback` with `fallback_cause = no_secret` | Sample Wishlist works. Analyse shows the secret-missing warning. Submit returns rule-based panels under the same warning |
+| Sample JSON missing | — | Error in the page, no traceback |
+| **Retry analysis** | unchanged until the call returns | Re-runs the adapter on the stored payload, in place. Form widgets are never re-read, so a retry cannot drop submitted values |
+| **Retry with no stored payload** | `validation_error` | Records the missing-information state instead of navigating; nothing is silently re-sent |
+| **Edit my information** | cleared | Widgets rewritten from the stored payload, stale result dropped, back to `view=analyse` with chest / waist / usual size / chart / reviews / save reason / timing intact |
+| Reset / Clear form | — | Clears size widgets / analyse form nonce and live result; navigation otherwise preserves session payload |
 
 The Groq client is imported only inside the live call path so a missing optional dependency cannot take down Sample Wishlist.
 
@@ -423,6 +451,8 @@ Local: `streamlit run mvp/streamlit_app.py` from the repo root. Sample Wishlist 
 | Simulated stock must not fake scarcity | Stock is labelled supporting context only |
 | No discounts | Rules and prompt forbid coupons and sale-waits |
 | Honest custom analysis | Submitted chart/reviews/size are used; API errors are not missing-information |
+| Re-entering details is friction | Retry re-uses the stored payload; Edit restores the form instead of clearing it |
+| Vague evidence does not build confidence | “Based on” lines quote the shopper's own measurements, chart row, reviews, and timing |
 
 ---
 

@@ -7,6 +7,7 @@ Run from the repository root:
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sys
@@ -358,8 +359,8 @@ class ShopperCopyTests(unittest.TestCase):
             "size_info": "Usual M, chest 40 in",
             "chest": 40,
         }
-        result = app._parse_failed_result(payload)
-        self.assertEqual(result["failure_kind"], "parse")
+        result = app._processing_error_result(payload)
+        self.assertEqual(result["failure_kind"], app.PROCESSING_ERROR)
         self.assertNotEqual(result["decision_status"], "Needs more information")
         self.assertEqual(result["decision_reason"], app.PARSE_FAILED_MESSAGE)
         steps = app.live_next_steps(payload, result)
@@ -628,7 +629,7 @@ class CustomAnalysisFlowTests(unittest.TestCase):
             "waist": None,
         }
         result = app.analyse_custom_item(payload, "gsk-test")
-        self.assertEqual(result["failure_kind"], "missing_information")
+        self.assertEqual(result["failure_kind"], app.VALIDATION_ERROR)
         self.assertEqual(result["decision_status"], "Needs more information")
         self.assertEqual(result["missing_fields"], app.validate_custom_payload(dict(payload)))
         joined = " ".join(result["missing_fields"]).lower()
@@ -640,7 +641,7 @@ class CustomAnalysisFlowTests(unittest.TestCase):
     def test_api_failure_is_not_missing_information(self) -> None:
         with patch.object(app, "call_groq", side_effect=app.GroqAPIError("down")):
             result = app.analyse_custom_item(_full_custom_payload(), "gsk-test")
-        self.assertEqual(result["failure_kind"], "rule_fallback")
+        self.assertEqual(result["failure_kind"], app.RULE_FALLBACK)
         self.assertTrue(result.get("is_rule_fallback"))
         self.assertEqual(result["source_label"], app.RULE_FALLBACK_LABEL)
         self.assertNotEqual(result["decision_status"], "Needs more information")
@@ -650,7 +651,7 @@ class CustomAnalysisFlowTests(unittest.TestCase):
     def test_parse_failure_is_not_missing_information(self) -> None:
         with patch.object(app, "call_groq", side_effect=app.GroqParseError("bad json")):
             result = app.analyse_custom_item(_full_custom_payload(), "gsk-test")
-        self.assertEqual(result["failure_kind"], "parse")
+        self.assertEqual(result["failure_kind"], app.PROCESSING_ERROR)
         self.assertNotEqual(result["decision_status"], "Needs more information")
         self.assertEqual(result["decision_reason"], app.PARSE_FAILED_MESSAGE)
         self.assertNotIn("size chart", result["decision_reason"].lower())
@@ -658,7 +659,7 @@ class CustomAnalysisFlowTests(unittest.TestCase):
     def test_unexpected_exception_is_not_converted_to_missing_information(self) -> None:
         with patch.object(app, "call_groq", side_effect=RuntimeError("boom")):
             result = app.analyse_custom_item(_full_custom_payload(), "gsk-test")
-        self.assertEqual(result["failure_kind"], "rule_fallback")
+        self.assertEqual(result["failure_kind"], app.RULE_FALLBACK)
         self.assertTrue(result.get("is_rule_fallback"))
         self.assertNotEqual(result["decision_status"], "Needs more information")
         self.assertEqual(result["source_label"], app.RULE_FALLBACK_LABEL)
@@ -707,12 +708,231 @@ class CustomAnalysisFlowTests(unittest.TestCase):
 
     def test_missing_secret_is_not_missing_information(self) -> None:
         result = app.analyse_custom_item(_full_custom_payload(), None)
-        self.assertEqual(result["failure_kind"], "rule_fallback")
+        self.assertEqual(result["failure_kind"], app.RULE_FALLBACK)
         self.assertTrue(result.get("is_rule_fallback"))
         self.assertEqual(result["source_label"], app.RULE_FALLBACK_LABEL)
         self.assertNotEqual(result["decision_status"], "Needs more information")
         self.assertFalse(result.get("is_live"))
         self.assertNotIn("Add a size chart", " ".join(result.get("missing_fields") or []))
+
+
+def _groq_module_returning(body) -> MagicMock:
+    """A stand-in groq package whose completion returns `body`."""
+    captured: dict = {}
+
+    class _Completions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            message = MagicMock()
+            message.content = body if isinstance(body, str) else json.dumps(body)
+            choice = MagicMock()
+            choice.message = message
+            response = MagicMock()
+            response.choices = [choice]
+            return response
+
+    client = MagicMock()
+    client.chat.completions = _Completions()
+    module = MagicMock()
+    module.Groq = MagicMock(return_value=client)
+    module.captured = captured
+    return module
+
+
+class CustomAnalysisRegressionTests(unittest.TestCase):
+    """Regressions that broke the deployed Analyse-an-Item flow before.
+
+    Each test maps to one guarantee: the request is strict, each failure mode
+    keeps its own identity, and a retry or an edit never loses submitted input.
+    """
+
+    def test_01_response_schema_is_strict_fully_required_and_closed(self) -> None:
+        schema = app.ANALYSIS_SCHEMA
+        self.assertIs(schema["additionalProperties"], False)
+        self.assertEqual(sorted(schema["required"]), sorted(schema["properties"]))
+        for key in app.LIVE_RESULT_REQUIRED_KEYS:
+            self.assertIn(key, schema["required"])
+
+        groq_module = _groq_module_returning(_VALID_GROQ)
+        with patch.dict(sys.modules, {"groq": groq_module}):
+            app.call_groq(_full_custom_payload(), "gsk-test")
+        sent = groq_module.captured["response_format"]
+        self.assertEqual(sent["type"], "json_schema")
+        self.assertIs(sent["json_schema"]["strict"], True)
+        self.assertIs(sent["json_schema"]["schema"], schema)
+
+    def test_02_valid_groq_json_passes_validation(self) -> None:
+        self.assertEqual(app.validate_live_schema(dict(_VALID_GROQ)), [])
+        groq_module = _groq_module_returning(_VALID_GROQ)
+        with patch.dict(sys.modules, {"groq": groq_module}):
+            result = app.analyse_custom_item(_full_custom_payload(), "gsk-test")
+        self.assertIsNone(result.get("failure_kind"))
+        self.assertTrue(result["is_live"])
+        self.assertFalse(result["is_rule_fallback"])
+        self.assertEqual(result["fit_recommendation"], "M")
+        self.assertEqual(result["decision_status"], "Ready to buy")
+
+    def test_03_missing_response_fields_produce_processing_error(self) -> None:
+        for dropped in ("next_step", "fit_reason", "decision_evidence_used"):
+            with self.subTest(dropped=dropped):
+                incomplete = {k: v for k, v in _VALID_GROQ.items() if k != dropped}
+                errors = app.validate_live_schema(incomplete)
+                self.assertIn(f"Missing field: {dropped}", errors)
+                with patch.object(app, "call_groq", return_value=incomplete):
+                    result = app.analyse_custom_item(_full_custom_payload(), "gsk-test")
+                self.assertEqual(result["failure_kind"], app.PROCESSING_ERROR)
+                self.assertEqual(result["missing_fields"], [])
+
+    def test_04_invalid_enum_values_produce_processing_error(self) -> None:
+        cases = (
+            {"fit_confidence": "Pretty sure"},
+            {"decision_status": "YOLO buy it"},
+        )
+        for override in cases:
+            with self.subTest(**override):
+                bad = dict(_VALID_GROQ, **override)
+                self.assertTrue(app.validate_live_schema(bad))
+                with patch.object(app, "call_groq", return_value=bad):
+                    result = app.analyse_custom_item(_full_custom_payload(), "gsk-test")
+                self.assertEqual(result["failure_kind"], app.PROCESSING_ERROR)
+                # A rejected enum is not a shopper problem.
+                self.assertEqual(result["missing_fields"], [])
+                self.assertNotEqual(result["failure_kind"], app.VALIDATION_ERROR)
+
+    def test_05_groq_service_failure_produces_service_error(self) -> None:
+        payload = _full_custom_payload()
+        for error in (app.GroqAPIError("down"), RuntimeError("socket reset")):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(app, "call_groq", side_effect=error):
+                    result = app.analyse_custom_item(payload, "gsk-test")
+                self.assertEqual(result["fallback_cause"], app.SERVICE_ERROR)
+                self.assertEqual(
+                    app.fallback_cause_message(result), app.API_UNAVAILABLE_MESSAGE
+                )
+                self.assertNotEqual(result["failure_kind"], app.VALIDATION_ERROR)
+                self.assertNotEqual(result["failure_kind"], app.PROCESSING_ERROR)
+
+    def test_06_a_valid_payload_never_produces_validation_error(self) -> None:
+        payload = _full_custom_payload()
+        self.assertEqual(app.validate_custom_payload(dict(payload)), [])
+        outcomes = {
+            "success": dict(_VALID_GROQ),
+            "parse": app.GroqParseError("bad json"),
+            "service": app.GroqAPIError("down"),
+            "unexpected": RuntimeError("boom"),
+        }
+        for name, behaviour in outcomes.items():
+            with self.subTest(outcome=name):
+                kwargs = (
+                    {"return_value": behaviour}
+                    if isinstance(behaviour, dict)
+                    else {"side_effect": behaviour}
+                )
+                with patch.object(app, "call_groq", **kwargs):
+                    result = app.analyse_custom_item(payload, "gsk-test")
+                self.assertNotEqual(result.get("failure_kind"), app.VALIDATION_ERROR)
+                self.assertEqual(result["missing_fields"], [])
+                self.assertFalse(result.get("thin_payload"))
+                blob = _shopper_facing_text(result, payload).lower()
+                self.assertNotIn("needs more information", blob)
+
+    def test_07_retry_uses_the_exact_stored_payload(self) -> None:
+        payload = _full_custom_payload()
+        session = {"custom_analysis_payload": payload, "analyse_nonce": 0}
+        seen: dict = {}
+
+        def fake_analyse(received: dict, api_key: str | None) -> dict:
+            seen["payload"] = received
+            return dict(_VALID_GROQ, failure_kind=None)
+
+        with patch.object(app.st, "session_state", session):
+            with patch.object(app.st, "rerun"):
+                with patch.object(app, "get_groq_api_key", return_value="gsk-test"):
+                    with patch.object(
+                        app, "analyse_custom_item", side_effect=fake_analyse
+                    ):
+                        app.retry_saved_analysis()
+
+        self.assertIs(seen["payload"], payload)
+        self.assertEqual(session["custom_analysis_payload"], payload)
+
+    def test_08_retry_does_not_rebuild_from_blank_widget_defaults(self) -> None:
+        payload = _full_custom_payload()
+        session = {
+            "custom_analysis_payload": payload,
+            "analyse_nonce": 0,
+            # Streamlit has already dropped the form widgets: blanks and zeroes.
+            "ca_prod_name_0": "",
+            "ca_chest_0": 0.0,
+            "ca_waist_0": 0.0,
+            "ca_usual_0": None,
+            "ca_size_chart_0": "",
+        }
+        seen: dict = {}
+
+        def fake_analyse(received: dict, api_key: str | None) -> dict:
+            seen["payload"] = received
+            return dict(_VALID_GROQ)
+
+        with patch.object(app.st, "session_state", session):
+            with patch.object(app.st, "rerun"):
+                with patch.object(app, "get_groq_api_key", return_value="gsk-test"):
+                    with patch.object(app, "build_custom_analysis_payload") as build:
+                        with patch.object(
+                            app, "analyse_custom_item", side_effect=fake_analyse
+                        ):
+                            app.retry_saved_analysis()
+
+        build.assert_not_called()
+        self.assertEqual(seen["payload"]["chest"], 40.0)
+        self.assertEqual(seen["payload"]["product_name"], "Cotton shirt")
+        self.assertEqual(seen["payload"]["usual_size"], "M")
+
+    def test_09_edit_restores_every_submitted_decision_field(self) -> None:
+        payload = _full_custom_payload(
+            waist=32.0,
+            reviews="True to size.\nRuns a little long.",
+        )
+        session = {
+            "custom_analysis_payload": payload,
+            "custom_analysis_result": {"failure_kind": app.SERVICE_ERROR},
+            "analyse_nonce": 0,
+        }
+        with patch.object(app.st, "session_state", session):
+            with patch.object(app.st, "query_params", MagicMock()):
+                with patch.object(app.st, "rerun"):
+                    app.edit_saved_analysis()
+
+        self.assertEqual(session["ca_chest_0"], 40.0)
+        self.assertEqual(session["ca_waist_0"], 32.0)
+        self.assertEqual(session["ca_usual_0"], "M")
+        self.assertEqual(session["ca_size_chart_0"], payload["size_chart"])
+        self.assertEqual(session["ca_reviews_0"], payload["reviews"])
+        self.assertEqual(session["ca_save_reason_0"], payload["why_saved"])
+        self.assertEqual(session["ca_timeline_0"], payload["occasion_timing"])
+
+    def test_10_chest_forty_survives_a_retry_and_then_an_edit(self) -> None:
+        payload = _full_custom_payload()
+        session = {
+            "custom_analysis_payload": payload,
+            "analyse_nonce": 0,
+            "ca_chest_0": 0.0,
+        }
+        with patch.object(app.st, "session_state", session):
+            with patch.object(app.st, "query_params", MagicMock()):
+                with patch.object(app.st, "rerun"):
+                    with patch.object(app, "get_groq_api_key", return_value="gsk-test"):
+                        with patch.object(
+                            app, "call_groq", side_effect=app.GroqAPIError("down")
+                        ):
+                            app.retry_saved_analysis()
+                            self.assertEqual(
+                                session["custom_analysis_payload"]["chest"], 40.0
+                            )
+                            app.edit_saved_analysis()
+
+        self.assertEqual(session["custom_analysis_payload"]["chest"], 40.0)
+        self.assertEqual(session["ca_chest_0"], 40.0)
 
 
 class GroqAdapterTests(unittest.TestCase):
@@ -736,6 +956,53 @@ class GroqAdapterTests(unittest.TestCase):
         for key in app.CUSTOM_PAYLOAD_FIELDS:
             self.assertIn(app.CUSTOM_PAYLOAD_FIELD_LABELS[key] + ":", prompt)
         self.assertIn("only valid json", app.SYSTEM_PROMPT.lower())
+
+    def test_call_requests_strict_structured_output(self) -> None:
+        schema = app.ANALYSIS_SCHEMA
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            schema["properties"]["decision_status"]["enum"],
+            list(app.LIVE_DECISION_STATUSES),
+        )
+        self.assertEqual(
+            schema["properties"]["fit_confidence"]["enum"], ["High", "Medium", "Low"]
+        )
+        for key in app.LIVE_RESULT_REQUIRED_KEYS:
+            self.assertIn(key, schema["properties"])
+            self.assertIn(key, schema["required"])
+        self.assertEqual(sorted(schema["required"]), sorted(schema["properties"]))
+
+        captured: dict = {}
+
+        class _Completions:
+            def create(self, **kwargs):
+                captured.update(kwargs)
+                message = MagicMock()
+                message.content = json.dumps(_VALID_GROQ)
+                choice = MagicMock()
+                choice.message = message
+                response = MagicMock()
+                response.choices = [choice]
+                return response
+
+        client = MagicMock()
+        client.chat.completions = _Completions()
+        groq_module = MagicMock()
+        groq_module.Groq = MagicMock(return_value=client)
+        with patch.dict(sys.modules, {"groq": groq_module}):
+            parsed = app.call_groq(_full_custom_payload(), "gsk-test")
+
+        self.assertEqual(parsed["decision_status"], "Ready to buy")
+        self.assertEqual(captured["model"], app.GROQ_MODEL)
+        self.assertEqual(captured["temperature"], 0.2)
+        self.assertEqual(captured["max_tokens"], 700)
+        self.assertNotIn("stream", captured)
+        self.assertNotIn("tools", captured)
+        response_format = captured["response_format"]
+        self.assertEqual(response_format["type"], "json_schema")
+        self.assertTrue(response_format["json_schema"]["strict"])
+        self.assertEqual(response_format["json_schema"]["name"], "wishlist_item_analysis")
+        self.assertIs(response_format["json_schema"]["schema"], app.ANALYSIS_SCHEMA)
 
     def test_code_fences_are_stripped_before_json_parse(self) -> None:
         body = json.dumps(_VALID_GROQ)
@@ -786,7 +1053,7 @@ class RuleFallbackTests(unittest.TestCase):
         self.assertEqual(result["source_label"], app.RULE_FALLBACK_LABEL)
         self.assertTrue(result["is_rule_fallback"])
         self.assertFalse(result["is_live"])
-        self.assertEqual(result["failure_kind"], "rule_fallback")
+        self.assertEqual(result["failure_kind"], app.RULE_FALLBACK)
         self.assertEqual(result["missing_fields"], [])
         self.assertIn("Submitted size chart", result["fit_evidence_used"])
         self.assertTrue(any("Usual size" in row for row in result["fit_evidence_used"]))
@@ -846,6 +1113,340 @@ class RuleFallbackTests(unittest.TestCase):
         self.assertFalse(result.get("is_rule_fallback"))
         self.assertNotEqual(result.get("source_label"), app.RULE_FALLBACK_LABEL)
         self.assertTrue(result.get("is_live"))
+
+
+class FailureStateTests(unittest.TestCase):
+    """The three states must stay distinct and must not become Low fit confidence."""
+
+    def test_validation_error_names_only_the_absent_fields(self) -> None:
+        payload = _full_custom_payload(
+            size_chart=None,
+            reviews=None,
+            chest=None,
+            waist=None,
+            size_info="Usual M",
+        )
+        result = app.analyse_custom_item(payload, "gsk-test")
+        self.assertEqual(result["failure_kind"], app.VALIDATION_ERROR)
+        self.assertEqual(result["decision_status"], "Needs more information")
+        self.assertTrue(result["missing_fields"])
+        joined = " ".join(result["missing_fields"]).lower()
+        self.assertIn("fit evidence", joined)
+        self.assertNotIn("product name", joined)
+        self.assertNotIn("category", joined)
+
+    def test_processing_error_shows_its_own_message_and_no_verdict(self) -> None:
+        payload = _full_custom_payload()
+        with patch.object(app, "call_groq", side_effect=app.GroqParseError("bad json")):
+            result = app.analyse_custom_item(payload, "gsk-test")
+        self.assertEqual(result["failure_kind"], app.PROCESSING_ERROR)
+        self.assertEqual(result["decision_reason"], app.PARSE_FAILED_MESSAGE)
+        self.assertEqual(result["missing_fields"], [])
+        self.assertEqual(app.verdict_kind(result), "")
+        self.assertEqual(app.live_next_steps(payload, result), ["Please try again"])
+        self.assertNotIn("missing", _shopper_facing_text(result, payload).lower())
+
+    def test_service_error_keeps_the_rule_result_and_banners_the_outage(self) -> None:
+        payload = _full_custom_payload()
+        for error in (app.GroqAPIError("rate limited"), RuntimeError("socket reset")):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(app, "call_groq", side_effect=error):
+                    result = app.analyse_custom_item(payload, "gsk-test")
+                self.assertEqual(result["failure_kind"], app.RULE_FALLBACK)
+                self.assertEqual(result["fallback_cause"], app.SERVICE_ERROR)
+                self.assertEqual(
+                    app.fallback_cause_message(result), app.API_UNAVAILABLE_MESSAGE
+                )
+                self.assertIn("Live analysis", app.API_UNAVAILABLE_MESSAGE)
+                self.assertFalse(result["is_live"])
+                self.assertNotEqual(result["decision_status"], "Needs more information")
+                self.assertEqual(result["missing_fields"], [])
+
+    def test_missing_secret_banners_the_secret_message_not_an_outage(self) -> None:
+        result = app.analyse_custom_item(_full_custom_payload(), None)
+        self.assertEqual(result["failure_kind"], app.RULE_FALLBACK)
+        self.assertEqual(result["fallback_cause"], app.NO_SECRET)
+        self.assertEqual(
+            app.fallback_cause_message(result), app.SECRET_MISSING_MESSAGE
+        )
+
+    def test_a_successful_analysis_has_no_failure_state_or_banner(self) -> None:
+        with patch.object(app, "call_groq", return_value=dict(_VALID_GROQ)):
+            result = app.analyse_custom_item(_full_custom_payload(), "gsk-test")
+        self.assertIsNone(result.get("failure_kind"))
+        self.assertIsNone(result.get("fallback_cause"))
+        self.assertEqual(app.fallback_cause_message(result), "")
+
+    def test_processing_and_service_errors_never_become_low_confidence_verdicts(self) -> None:
+        payload = _full_custom_payload()
+        with patch.object(app, "call_groq", side_effect=app.GroqParseError("bad")):
+            processing = app.analyse_custom_item(payload, "gsk-test")
+        with patch.object(app, "call_groq", side_effect=app.GroqAPIError("down")):
+            service = app.analyse_custom_item(payload, "gsk-test")
+        # A processing error states it could not be processed; it does not rate fit.
+        self.assertEqual(app.verdict_kind(processing), "")
+        self.assertEqual(processing["decision_status"], "")
+        # A service error still reports the rules' own confidence, not a forced Low.
+        self.assertEqual(service["fit_confidence"], app.compute_custom_analysis_fallback(payload)["fit_confidence"])
+        self.assertIn(service["decision_status"], app.VERDICT_STYLES)
+
+    def test_retry_reuses_the_stored_payload_and_never_the_form_widgets(self) -> None:
+        payload = _full_custom_payload()
+        session = {
+            "custom_analysis_payload": payload,
+            "custom_analysis_result": {"failure_kind": app.PROCESSING_ERROR},
+            "ca_chest_0": 0.0,
+        }
+        seen: dict = {}
+
+        def fake_analyse(received: dict, api_key: str | None) -> dict:
+            seen["payload"] = received
+            seen["api_key"] = api_key
+            return dict(_VALID_GROQ, failure_kind=None)
+
+        with patch.object(app.st, "session_state", session):
+            with patch.object(app.st, "rerun") as rerun:
+                with patch.object(app, "get_groq_api_key", return_value="gsk-test"):
+                    with patch.object(app, "analyse_custom_item", side_effect=fake_analyse):
+                        app.retry_saved_analysis()
+
+        self.assertIs(seen["payload"], payload)
+        self.assertEqual(seen["payload"]["chest"], 40.0)
+        self.assertEqual(seen["api_key"], "gsk-test")
+        self.assertIsNone(session["custom_analysis_result"]["failure_kind"])
+        self.assertEqual(session["custom_analysis_payload"], payload)
+        rerun.assert_called_once()
+
+    def test_retry_without_a_stored_payload_stays_on_the_result_page(self) -> None:
+        session: dict = {}
+        qp = MagicMock()
+        with patch.object(app.st, "session_state", session):
+            with patch.object(app.st, "query_params", qp):
+                with patch.object(app.st, "rerun"):
+                    with patch.object(app, "analyse_custom_item") as analyse:
+                        app.retry_saved_analysis()
+        analyse.assert_not_called()
+        qp.from_dict.assert_not_called()
+        self.assertEqual(
+            session["custom_analysis_result"]["failure_kind"], app.VALIDATION_ERROR
+        )
+
+    def test_every_analyse_input_has_an_explicit_key_that_restore_writes(self) -> None:
+        """A widget with no key, or a key restore skips, silently loses input."""
+        inputs = {
+            "text_input",
+            "text_area",
+            "number_input",
+            "selectbox",
+            "radio",
+            "multiselect",
+        }
+        tree = ast.parse(Path(app.__file__).read_text(encoding="utf-8"))
+        form = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "render_analyse_page"
+        )
+        keys = []
+        for node in ast.walk(form):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and getattr(node.func.value, "id", None) == "st"
+                and node.func.attr in inputs
+            ):
+                keyword = next((k for k in node.keywords if k.arg == "key"), None)
+                self.assertIsNotNone(
+                    keyword, f"st.{node.func.attr} on line {node.lineno} has no key"
+                )
+                keys.append(ast.unparse(keyword.value).replace("{nonce}", "7"))
+
+        self.assertEqual(len(keys), 16)
+        session = {"analyse_nonce": 7}
+        with patch.object(app.st, "session_state", session):
+            app.restore_custom_form(_full_custom_payload())
+        for key in keys:
+            self.assertIn(key.strip("f'\""), session)
+
+    def test_restore_writes_every_analyse_widget_in_its_own_widget_shape(self) -> None:
+        payload = _full_custom_payload(
+            unresolved_questions="Fit or size, Reviews",
+            comparison_status="comparing",
+            availability="Only L in stock",
+            extra_context="Matching chinos already owned",
+            waist=32.0,
+        )
+        session = {"analyse_nonce": 3, "ca_chest_3": 0.0, "ca_waist_3": 0.0}
+        with patch.object(app.st, "session_state", session):
+            app.restore_custom_form(payload)
+
+        self.assertEqual(session["ca_prod_name_3"], "Cotton shirt")
+        self.assertEqual(session["ca_brand_3"], "Netplay")
+        self.assertEqual(session["ca_category_3"], "Men's Shirts")
+        self.assertEqual(session["ca_price_3"], "1899")
+        self.assertEqual(session["ca_size_chart_3"], payload["size_chart"])
+        self.assertEqual(session["ca_reviews_3"], payload["reviews"])
+        self.assertEqual(session["ca_availability_3"], "Only L in stock")
+        self.assertEqual(session["ca_usual_3"], "M")
+        self.assertEqual(session["ca_chest_3"], 40.0)
+        self.assertEqual(session["ca_waist_3"], 32.0)
+        self.assertEqual(session["ca_save_reason_3"], payload["why_saved"])
+        self.assertEqual(session["ca_timeline_3"], "7 days")
+        self.assertEqual(session["ca_extra_3"], payload["extra_context"])
+        # Radios take their option strings and the multiselect takes a list;
+        # a boolean would be rejected by the widget on the next run.
+        self.assertEqual(session["ca_occasion_3"], "Yes")
+        self.assertEqual(session["ca_comparing_3"], "Yes")
+        self.assertEqual(session["ca_unsure_3"], ["Fit or size", "Reviews"])
+
+    def test_restore_does_not_reuse_a_stale_nonce_key(self) -> None:
+        session = {"analyse_nonce": 1}
+        with patch.object(app.st, "session_state", session):
+            app.restore_custom_form(_full_custom_payload())
+        self.assertEqual(session["ca_prod_name_1"], "Cotton shirt")
+        self.assertNotIn("ca_prod_name_0", session)
+
+    def test_editing_restores_the_submitted_values_including_measurements(self) -> None:
+        payload = _full_custom_payload()
+        session = {
+            "custom_analysis_payload": payload,
+            "custom_analysis_result": {"failure_kind": app.SERVICE_ERROR},
+            "analyse_nonce": 0,
+            "ca_chest_0": 0.0,
+        }
+        qp = MagicMock()
+        with patch.object(app.st, "session_state", session):
+            with patch.object(app.st, "query_params", qp):
+                with patch.object(app.st, "rerun"):
+                    app.edit_saved_analysis()
+
+        self.assertNotIn("custom_analysis_result", session)
+        self.assertEqual(session["ca_chest_0"], payload["chest"])
+        self.assertEqual(session["ca_prod_name_0"], payload["product_name"])
+        self.assertEqual(session["custom_analysis_payload"], payload)
+        qp.from_dict.assert_called_once_with({"view": "analyse"})
+
+    def test_editing_routes_by_query_param_not_a_session_view_key(self) -> None:
+        """current_view reads st.query_params, so a session key would not move."""
+        session = {"custom_analysis_payload": _full_custom_payload(), "analyse_nonce": 0}
+        qp = MagicMock()
+        with patch.object(app.st, "session_state", session):
+            with patch.object(app.st, "query_params", qp):
+                with patch.object(app.st, "rerun") as rerun:
+                    app.edit_saved_analysis()
+        qp.from_dict.assert_called_once_with({"view": "analyse"})
+        rerun.assert_called_once()
+
+    def test_restoration_finishes_before_the_rerun_that_renders_the_form(self) -> None:
+        """The form is only built on the next run, so state must be set by then."""
+        payload = _full_custom_payload()
+        session = {
+            "custom_analysis_payload": payload,
+            "analyse_nonce": 0,
+            "ca_chest_0": 0.0,
+            "ca_prod_name_0": "",
+        }
+        at_rerun: dict = {}
+        with patch.object(app.st, "session_state", session):
+            with patch.object(app.st, "query_params", MagicMock()):
+                with patch.object(
+                    app.st, "rerun", side_effect=lambda: at_rerun.update(session)
+                ):
+                    app.edit_saved_analysis()
+
+        self.assertEqual(at_rerun["ca_chest_0"], 40.0)
+        self.assertEqual(at_rerun["ca_prod_name_0"], "Cotton shirt")
+
+    def test_the_analyse_page_seeds_state_before_it_builds_any_widget(self) -> None:
+        """Streamlit reads session state when a widget is created, not after."""
+        tree = ast.parse(Path(app.__file__).read_text(encoding="utf-8"))
+        page = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "render_analyse_page"
+        )
+        seeds = [
+            node.lineno
+            for node in ast.walk(page)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "_ensure_custom_form_state"
+        ]
+        widgets = [
+            node.lineno
+            for node in ast.walk(page)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and getattr(node.func.value, "id", None) == "st"
+            and node.func.attr
+            in {
+                "form",
+                "text_input",
+                "text_area",
+                "number_input",
+                "selectbox",
+                "radio",
+                "multiselect",
+            }
+        ]
+        self.assertTrue(seeds, "render_analyse_page never seeds form state")
+        self.assertLess(max(seeds), min(widgets))
+        # Restoration overwrites, so it must never run mid-render: it would
+        # revert whatever the shopper is typing back to the submitted payload.
+        called = {
+            node.func.id
+            for node in ast.walk(page)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertNotIn("restore_custom_form", called)
+        self.assertNotIn("edit_saved_analysis", called)
+
+    def test_editing_without_a_stored_payload_does_not_raise(self) -> None:
+        session: dict = {}
+        with patch.object(app.st, "session_state", session):
+            with patch.object(app.st, "query_params", MagicMock()):
+                with patch.object(app.st, "rerun"):
+                    app.edit_saved_analysis()
+        self.assertEqual(session["ca_chest_0"], 0.0)
+        self.assertEqual(session["ca_prod_name_0"], "")
+
+    def test_retry_failure_becomes_a_service_error_not_a_crash(self) -> None:
+        payload = _full_custom_payload()
+        session = {"custom_analysis_payload": payload}
+        with patch.object(app.st, "session_state", session):
+            with patch.object(app.st, "rerun"):
+                with patch.object(app, "get_groq_api_key", return_value="gsk-test"):
+                    with patch.object(
+                        app, "analyse_custom_item", side_effect=RuntimeError("boom")
+                    ):
+                        app.retry_saved_analysis()
+        result = session["custom_analysis_result"]
+        self.assertEqual(result["fallback_cause"], app.SERVICE_ERROR)
+        self.assertEqual(result["failure_kind"], app.RULE_FALLBACK)
+
+    def test_logging_attaches_traceback_but_never_the_key_or_payload(self) -> None:
+        records: list[str] = []
+        captured_kwargs: list[dict] = []
+
+        def capture(fmt, *args, **kwargs):
+            records.append(fmt % args if args else str(fmt))
+            captured_kwargs.append(kwargs)
+
+        payload = _full_custom_payload()
+        with patch.object(app.logger, "error", side_effect=capture):
+            try:
+                raise RuntimeError("gsk-secret-value")
+            except RuntimeError as exc:
+                app._log_adapter_error("Custom analysis API request failed", exc)
+
+        blob = " ".join(records)
+        self.assertIn("Custom analysis API request failed", blob)
+        self.assertIn("RuntimeError", blob)
+        self.assertNotIn("gsk", blob.lower())
+        for value in payload.values():
+            if isinstance(value, str) and len(value) > 12:
+                self.assertNotIn(value, blob)
+        self.assertTrue(captured_kwargs)
+        self.assertIn("exc_info", captured_kwargs[0])
 
 
 class FormatDecisionEvidenceTests(unittest.TestCase):
@@ -929,6 +1530,160 @@ class FormatDecisionEvidenceTests(unittest.TestCase):
         self.assertNotIn("intent_state", blob)
         self.assertNotIn("save_reason:", blob)
         self.assertNotIn("comparing • active", blob)
+
+
+def _evidence_payload(**overrides) -> dict:
+    payload = {
+        "product_name": "Cotton shirt",
+        "brand": "Netplay",
+        "category": "Men's Shirts",
+        "price": "1899",
+        "why_saved": "Need it for a client meeting",
+        "occasion_for": "Yes",
+        "occasion_timing": "7 days",
+        "size_chart": "M: Chest 40 inches; L: Chest 42 inches",
+        "reviews": "True to size.\nSlightly snug across the chest.",
+        "availability": "Only size L listed this morning",
+        "usual_size": "M",
+        "chest": 40.0,
+        "waist": 32.0,
+        "comparison_status": "not_comparing",
+    }
+    payload.update(overrides)
+    return payload
+
+
+class CustomEvidenceTests(unittest.TestCase):
+    """The Analyse-an-Item panels must restate supplied values, never labels."""
+
+    def test_generic_labels_become_concrete_lines_from_supplied_values(self) -> None:
+        result = {
+            "fit_recommendation": "M",
+            "fit_confidence": "High",
+            "fit_evidence_used": ["size chart", "chest 40 in", "reviews"],
+            "decision_evidence_used": ["occasion", "price"],
+        }
+        payload = _evidence_payload()
+        fit = app.custom_fit_evidence(result, payload)
+        decision = app.custom_decision_evidence(result, payload)
+
+        self.assertIn("Your chest measurement: 40 inches", fit)
+        self.assertIn("Size M chart measurement: 40 inches", fit)
+        self.assertIn("One review describes the fit as true to size", fit)
+        self.assertIn("One review reports a slightly snug chest", fit)
+        self.assertIn("The item is needed in seven days", decision)
+        # The bare labels themselves are gone.
+        self.assertNotIn("size chart", fit)
+        self.assertNotIn("chest 40 in", fit)
+        self.assertNotIn("occasion", decision)
+
+    def test_a_cited_label_is_dropped_when_that_value_was_not_supplied(self) -> None:
+        result = {
+            "fit_recommendation": "M",
+            "fit_evidence_used": ["size chart", "customer reviews", "chest"],
+        }
+        thin = _evidence_payload(size_chart=None, reviews=None, chest=None)
+        lines = app.custom_fit_evidence(result, thin)
+        blob = " ".join(lines).lower()
+        self.assertNotIn("chart", blob)
+        self.assertNotIn("review", blob)
+        self.assertNotIn("inches", blob)
+
+    def test_an_absent_chart_still_says_so_in_words(self) -> None:
+        result = {"fit_evidence_used": ["missing_or_open: size_chart"]}
+        lines = app.custom_fit_evidence(result, _evidence_payload(size_chart=None))
+        self.assertEqual(lines, ["A size chart was not provided."])
+
+    def test_review_lines_count_the_reviews_and_agree_with_the_verb(self) -> None:
+        payload = _evidence_payload(
+            reviews="True to size.\nFits as expected.\nRuns a little long."
+        )
+        lines = app.custom_evidence_lines(["reviews"], {}, payload)
+        self.assertIn("Two reviews describe the fit as true to size", lines)
+        self.assertIn("One review notes the length runs long", lines)
+
+    def test_a_review_body_part_is_named_only_when_a_review_names_it(self) -> None:
+        named = app.custom_evidence_lines(
+            ["reviews"], {}, _evidence_payload(reviews="Snug around the shoulders.")
+        )
+        self.assertEqual(named, ["One review reports a snug shoulder"])
+        unnamed = app.custom_evidence_lines(
+            ["reviews"], {}, _evidence_payload(reviews="Felt snug overall.")
+        )
+        self.assertEqual(unnamed, ["One review reports a snug fit"])
+
+    def test_reviews_without_a_known_signal_quote_the_shopper_text(self) -> None:
+        lines = app.custom_evidence_lines(
+            ["reviews"], {}, _evidence_payload(reviews="The chest area is roomy.")
+        )
+        self.assertEqual(lines, ['One review notes: "The chest area is roomy"'])
+
+    def test_chart_line_uses_the_suggested_size_then_the_usual_size(self) -> None:
+        payload = _evidence_payload()
+        suggested = app.custom_evidence_lines(
+            ["size chart"], {"fit_recommendation": "L"}, payload
+        )
+        self.assertEqual(suggested, ["Size L chart measurement: 42 inches"])
+        # No suggestion yet: fall back to the size the shopper says they wear.
+        usual = app.custom_evidence_lines(["size chart"], {}, payload)
+        self.assertEqual(usual, ["Size M chart measurement: 40 inches"])
+
+    def test_timing_is_spelled_out_and_singular_for_one_day(self) -> None:
+        self.assertEqual(
+            app.custom_evidence_lines(
+                ["occasion"], {}, _evidence_payload(occasion_timing="tomorrow")
+            ),
+            ["The item is needed in one day"],
+        )
+        self.assertEqual(
+            app.custom_evidence_lines(
+                ["occasion"], {}, _evidence_payload(occasion_timing="no date")
+            ),
+            [],
+        )
+
+    def test_availability_is_never_presented_as_verified_live_stock(self) -> None:
+        lines = app.custom_evidence_lines(["availability"], {}, _evidence_payload())
+        self.assertEqual(len(lines), 1)
+        self.assertIn("Only size L listed this morning", lines[0])
+        self.assertIn("simulated", lines[0])
+
+    def test_no_internal_field_names_or_raw_json_reach_the_panels(self) -> None:
+        result = {
+            "fit_confidence": "High",
+            "fit_evidence_used": [
+                '{"fit_recommendation": "M"}',
+                "size_info: Usual M, chest 40 in",
+                "fit_confidence: high",
+            ],
+            "decision_evidence_used": ["comparison_status: comparing", "intent_state"],
+        }
+        payload = _evidence_payload(comparison_status="comparing")
+        blob = " ".join(
+            app.custom_fit_evidence(result, payload)
+            + app.custom_decision_evidence(result, payload)
+        )
+        for marker in (
+            "fit_recommendation",
+            "fit_confidence",
+            "size_info",
+            "comparison_status",
+            "intent_state",
+            "{",
+            "}",
+            '":',
+        ):
+            self.assertNotIn(marker, blob)
+        self.assertIn("You usually wear size M", blob)
+        self.assertIn("You are comparing another shortlisted product.", blob)
+
+    def test_demo_pages_keep_their_own_evidence_wording(self) -> None:
+        """The new copy is scoped to Analyse an Item, not the sample wishlist."""
+        lines = app.format_decision_evidence(
+            {"decision_evidence_used": ["occasion"]},
+            {"occasion_days_remaining": 9},
+        )
+        self.assertEqual(lines, ["You need this item in approximately 9 days."])
 
 
 class MeasurementEvidenceTests(unittest.TestCase):
@@ -1109,7 +1864,7 @@ class DeploymentFailureTests(unittest.TestCase):
         missing = app.validate_custom_payload(dict(payload))
         result = app.analyse_custom_item(payload, "gsk-test")
         self.assertEqual(result["decision_status"], "Needs more information")
-        self.assertEqual(result["failure_kind"], "missing_information")
+        self.assertEqual(result["failure_kind"], app.VALIDATION_ERROR)
         self.assertEqual(result["missing_fields"], missing)
         joined = " ".join(missing).lower()
         self.assertTrue(any("fit evidence" in item.lower() for item in missing))
@@ -1123,7 +1878,11 @@ class DeploymentFailureTests(unittest.TestCase):
         with patch.object(app, "call_groq", side_effect=app.GroqAPIError("down")):
             result = app.analyse_custom_item(payload, "gsk-test")
         self.assertNotEqual(result["decision_status"], "Needs more information")
-        self.assertNotEqual(result.get("failure_kind"), "missing_information")
+        self.assertNotEqual(result.get("failure_kind"), app.VALIDATION_ERROR)
+        self.assertEqual(result.get("fallback_cause"), app.SERVICE_ERROR)
+        self.assertEqual(
+            app.fallback_cause_message(result), app.API_UNAVAILABLE_MESSAGE
+        )
         label = str(result.get("source_label") or "")
         self.assertEqual(label, app.RULE_FALLBACK_LABEL)
         self.assertIn("unavailable", label.lower())
@@ -1140,7 +1899,7 @@ class DeploymentFailureTests(unittest.TestCase):
         payload = _complete_deployment_payload()
         with patch.object(app, "call_groq", side_effect=app.GroqParseError("bad json")):
             result = app.analyse_custom_item(payload, "gsk-test")
-        self.assertEqual(result["failure_kind"], "parse")
+        self.assertEqual(result["failure_kind"], app.PROCESSING_ERROR)
         self.assertEqual(result["decision_reason"], app.PARSE_FAILED_MESSAGE)
         self.assertEqual(result["fit_reason"], app.PARSE_FAILED_MESSAGE)
         self.assertNotEqual(result["decision_status"], "Needs more information")
@@ -1150,7 +1909,7 @@ class DeploymentFailureTests(unittest.TestCase):
         self.assertNotIn("add a size chart", blob.lower())
         dumped = json.dumps(result, default=str)
         self.assertNotIn("Traceback", dumped)
-        self.assertNotIn("missing_information", str(result.get("failure_kind")))
+        self.assertNotEqual(result.get("failure_kind"), app.VALIDATION_ERROR)
 
     def test_5_evidence_formatting_hides_internal_keys_and_html(self) -> None:
         result = {
