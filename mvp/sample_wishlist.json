@@ -1,66 +1,7 @@
 [
   {
-    "id": "netplay-slim-shirt",
-    "name": "Men Slim Fit Cotton Formal Shirt",
-    "brand": "NETPLAY",
-    "category": "Men's Shirts",
-    "price": 1299,
-    "size_chart": {
-      "S": {"chest": 38, "length": 27},
-      "M": {"chest": 40, "length": 28},
-      "L": {"chest": 42, "length": 29},
-      "XL": {"chest": 44, "length": 30}
-    },
-    "review_snippets": [
-      "Looks sharp but runs small — I had to size up from my usual M to L.",
-      "Slim fit is quite snug across the chest. Fabric quality is decent for the price.",
-      "Colour matches the photo. Sleeves on M were a bit short on me."
-    ],
-    "saved_days_ago": 5,
-    "stock_status": "low_stock"
-  },
-  {
-    "id": "aurelia-printed-kurta",
-    "name": "Women Printed Straight Cotton Kurta",
-    "brand": "AURELIA",
-    "category": "Women's Kurtas",
-    "price": 1499,
-    "size_chart": {
-      "S": {"chest": 36, "length": 44},
-      "M": {"chest": 38, "length": 45},
-      "L": {"chest": 40, "length": 46},
-      "XL": {"chest": 42, "length": 47}
-    },
-    "review_snippets": [
-      "True to size. I wear M everywhere and M was a perfect fit.",
-      "Soft cotton, colours didn't fade after a wash. Length is as described.",
-      "Comfortable for office — not clingy, not oversized."
-    ],
-    "saved_days_ago": 60,
-    "stock_status": "in_stock"
-  },
-  {
-    "id": "dnmx-skinny-jeans",
-    "name": "Women Mid-Rise Skinny Fit Jeans",
-    "brand": "DNMX",
-    "category": "Women's Jeans",
-    "price": 1799,
-    "size_chart": {
-      "26": {"waist": 26, "length": 32},
-      "28": {"waist": 28, "length": 32},
-      "30": {"waist": 30, "length": 32},
-      "32": {"waist": 32, "length": 32}
-    },
-    "review_snippets": [
-      "Runs small in the waist — I usually wear 28 but needed 30.",
-      "True to size for me. Stretch is good, didn't gap at the back.",
-      "Nice wash but the thigh is tight. Sizing feels inconsistent across batches."
-    ],
-    "saved_days_ago": 150,
-    "stock_status": "in_stock"
-  },
-  {
     "id": "and-aline-dress",
+    "scenario": "Upcoming occasion — consistent fit (fictional)",
     "name": "Women Solid A-Line Midi Dress",
     "brand": "AND",
     "category": "Women's Dresses",
@@ -76,7 +17,106 @@
       "Lining is good quality. Waist nips in exactly where it should in M.",
       "Wore it to a work dinner — fabric doesn't crease much in a cab."
     ],
+    "save_reason": "Need a midi for a cousin's wedding next week; already pictured wearing this.",
+    "intended_use": "Wedding guest / evening function",
+    "occasion_days_remaining": 9,
+    "unresolved_questions": [],
+    "comparison_status": "not_comparing",
+    "intent_state": "active",
     "saved_days_ago": 12,
-    "stock_status": "low_stock"
+    "stock_status": "in_stock",
+    "stock_is_simulated": true
+  },
+  {
+    "id": "aurelia-printed-kurta",
+    "scenario": "Future interest — no immediate need (fictional)",
+    "name": "Women Printed Straight Cotton Kurta",
+    "brand": "AURELIA",
+    "category": "Women's Kurtas",
+    "price": 1499,
+    "size_chart": {
+      "S": {"chest": 36, "length": 44},
+      "M": {"chest": 38, "length": 45},
+      "L": {"chest": 40, "length": 46},
+      "XL": {"chest": 42, "length": 47}
+    },
+    "review_snippets": [
+      "True to size. I wear M everywhere and M was a perfect fit.",
+      "Soft cotton, colours didn't fade after a wash. Length is as described.",
+      "Comfortable for office — not clingy, not oversized."
+    ],
+    "save_reason": "Loved the print and might want it for a later season — no date in mind.",
+    "intended_use": "Casual / office someday",
+    "occasion_days_remaining": null,
+    "unresolved_questions": [
+      "Do I actually have an occasion for this, or am I just collecting?"
+    ],
+    "comparison_status": "not_comparing",
+    "intent_state": "uncertain",
+    "saved_days_ago": 60,
+    "stock_status": "in_stock",
+    "stock_is_simulated": true
+  },
+  {
+    "id": "dnmx-skinny-jeans",
+    "scenario": "Stale save — conflicting fit (fictional)",
+    "name": "Women Mid-Rise Skinny Fit Jeans",
+    "brand": "DNMX",
+    "category": "Women's Jeans",
+    "price": 1799,
+    "size_chart": {
+      "26": {"waist": 26, "length": 32},
+      "28": {"waist": 28, "length": 32},
+      "30": {"waist": 30, "length": 32},
+      "32": {"waist": 32, "length": 32}
+    },
+    "review_snippets": [
+      "Runs small in the waist — I usually wear 28 but needed 30.",
+      "True to size for me. Stretch is good, didn't gap at the back.",
+      "Nice wash but the thigh is tight. Sizing feels inconsistent across batches."
+    ],
+    "save_reason": "Liked the wash months ago; never resolved whether they would fit.",
+    "intended_use": "Weekend / casual",
+    "occasion_days_remaining": null,
+    "unresolved_questions": [
+      "Will these run small in the waist for me?",
+      "Is this cut still what I want?"
+    ],
+    "comparison_status": "not_comparing",
+    "intent_state": "stale",
+    "saved_days_ago": 150,
+    "stock_status": "in_stock",
+    "stock_is_simulated": true
+  },
+  {
+    "id": "netplay-slim-shirt",
+    "scenario": "Active save — still comparing (fictional)",
+    "name": "Men Slim Fit Cotton Formal Shirt",
+    "brand": "NETPLAY",
+    "category": "Men's Shirts",
+    "price": 1299,
+    "size_chart": {
+      "S": {"chest": 38, "length": 27},
+      "M": {"chest": 40, "length": 28},
+      "L": {"chest": 42, "length": 29},
+      "XL": {"chest": 44, "length": 30}
+    },
+    "review_snippets": [
+      "Looks sharp but runs small — I had to size up from my usual M to L.",
+      "Slim fit is quite snug across the chest. Fabric quality is decent for the price.",
+      "Colour matches the photo. Sleeves on M were a bit short on me."
+    ],
+    "save_reason": "Need a white shirt for client meetings, but still weighing this against a John Players option.",
+    "intended_use": "Work / client meetings",
+    "occasion_days_remaining": null,
+    "unresolved_questions": [
+      "Is this cut better than the John Players slim-fit I also saved?",
+      "Should I size up here?"
+    ],
+    "comparison_status": "comparing",
+    "intent_state": "active",
+    "saved_days_ago": 5,
+    "stock_status": "low_stock",
+    "stock_is_simulated": true
   }
 ]

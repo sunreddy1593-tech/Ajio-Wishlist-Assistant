@@ -1,7 +1,8 @@
 # Problem statement
 
+High-intent delayed evaluators save fashion items they genuinely consider, then postpone buying while they resolve fit, quality, timing, or comparison uncertainty. The wishlist records that interest but does little to close it. Saved items stall — certainty never arrives, or a trigger arrives too late — and shoppers forget them, lose the size, or leave the app to settle doubt off-platform.
 
-Urban working professionals save fashion items they genuinely like, but most never buy them — because the wishlist captures interest without resolving the two things that actually block purchase: **confidence** (will it fit / is it right for me?) and a **reason to act now**. So saved items stall — waiting for certainty that never comes or a trigger that arrives too late — and shoppers either forget them or leave the app to resolve fit doubt in a physical store.
+This MVP does not claim to address every reason a wishlist item fails to convert. It targets **two recurring, actionable barriers selected for this MVP**: **fit/size confidence** and **decision deferral**.
 
 ---
 
@@ -9,55 +10,56 @@ Urban working professionals save fashion items they genuinely like, but most nev
 
 ### Target segment
 
-Urban working professionals (≈30–40) with purchasing power but **low urgency**. They save aspirationally and buy only when prompted.
+**High-intent delayed evaluators** — shoppers who genuinely consider wishlisted products but postpone purchasing while resolving fit, quality, timing or comparison uncertainty.
 
-They are not browsing because they cannot afford the item. They already liked it enough to save it. What they lack is enough certainty to click Buy, and a timely reason to do it now rather than “later.”
+They have already liked the item enough to save it. What they lack is enough certainty — and a reason to decide now rather than “later.” Delay can also involve **budget and price**; research found those can influence deferral. This MVP still cannot offer monetary incentives, so it does not treat affordability as a problem it can solve.
+
+Urban working professionals aged ≈30–40 were the **interview sample**. They are not the complete behavioural segment.
 
 ### Product outcome to influence
 
 **Wishlist → purchase conversion within 30 days of saving.**
 
-The prize is demand that already exists: high-intent saves that currently leak out of the funnel.
+The prize is demand that already exists: high-intent saves that currently leak out of the funnel — through unanswered fit doubt, postponed decisions, off-platform checks, fading interest, or the size no longer being there.
 
-### Root cause
+### How the problem shows up
 
-The wishlist is a **passive parking lot**. It records that a user liked something, but does nothing to:
+The wishlist is a **passive parking lot**. It records that someone liked something, then leaves conversion to chance.
 
-1. **Resolve the fit / quality doubt** that makes them hesitate (“Will it fit? Is it right for me?”).
-2. **Surface the trigger** that would make them act (right moment, still in stock, still the right price).
+**Fit/size confidence.** Shoppers hesitate on “will it fit / is it right for me?” Size charts and reviews sit beside the save, but the save itself does not turn them into a size recommendation or a stated confidence level. Quality doubt often travels with fit.
 
-Interest is captured. Conversion is left to chance. Saved items wait for a certainty that never comes, or for a trigger that arrives too late (or not at all).
+**Decision deferral.** Even when the item is still wanted, there is no in-app prompt to decide now versus keep waiting. Timing stays vague. Comparison and “I’ll come back later” stretch the delay. Budget and price can add to that wait; they are in-scope as *causes of deferral* in research, out of scope as *levers* for this MVP (no discounts or coupons).
 
-### Existing workarounds
+**Off-platform workarounds.** Because the wishlist does not close those gaps, people invent their own:
 
-Because the wishlist does not close those two gaps, people invent their own:
+- Physical stores or direct-to-brand sites to check fit and quality
+- Other apps to compare price
+- Re-saving items they forgot
+- Cart or screenshots as a bookmark — treating wishlist and cart as the same hold
 
-- They go to **physical stores** or **direct-to-brand sites** to check fit and quality.
-- They **cross-check other apps** for price.
-- They **re-save items they forgot**.
-- Many rely on **cart or screenshots** instead of the wishlist — treating “wishlist” and “cart” as the same bookmark.
+Those paths cost effort. They often end **off-platform** (a lost sale) or in a **stock-out** (a dead save).
 
-These workarounds cost effort. They often end **off-platform** (a lost sale) or in a **stock-out** (a dead save).
+**Interest decay and size availability.** The longer a save sits, the easier it is to forget. Simulated and real catalogues alike: by the time someone returns, interest has cooled or the size is gone. Recency and availability matter to conversion even when this MVP cannot see live inventory.
 
 ### Why it matters to users
 
-It removes the two frictions that make saving-then-buying feel risky and effortful — giving them **confidence to buy the item they already wanted, in-app**, without a store trip.
+For the two barriers this MVP takes on: it makes saving-then-buying less risky and less effortful on fit, and clearer on whether to decide now — in-app, without a store trip. It does not remove price or budget as reasons to wait.
 
 ### Why it matters to the business
 
-It converts demand that already exists (high-intent saves) into purchases **without discounts** — protecting margin, lifting purchase frequency, and recovering sales currently lost to physical stores and stock-outs.
+It aims to convert demand that already exists (high-intent saves) **without discounts** — protecting margin — by recovering some of the sales currently lost to physical stores, forgotten saves, and stock-outs. Other non-conversion reasons (including affordability) remain.
 
 ---
 
 ## The intervention this MVP tests
 
-**One tool, two questions, no monetary incentives.**
+**One tool, two selected barriers, no monetary incentives.**
 
-For items sitting in a fashion wishlist, the Wishlist Decision Assistant answers:
+The Wishlist Decision Assistant does **not** claim to solve every reason for wishlist non-conversion (price comparison, budget, quality in full, every off-platform habit). It tests two selected barriers:
 
-| Blocker | Question | Panel |
+| Selected barrier | Question | Panel |
 | --- | --- | --- |
-| Confidence | Will it fit / is it right for me? | **Fit Confidence** — recommended size, High / Medium / Low, one-line reason |
-| Deferral | Should I buy now or keep waiting? | **Buy or Wait?** — act now vs wait, with a one-line rationale |
+| Fit/size confidence | Will it fit / is it right for me? | **Fit Confidence** — recommended size, High / Medium / Low, one-line reason |
+| Decision deferral | Should I buy now or keep waiting? | **Buy or Wait?** — act now vs wait, with a one-line rationale |
 
-The bet: if you resolve fit doubt and surface a non-discount trigger (stock, recency, remaining uncertainty), more saved items convert inside 30 days — on-platform, at full price.
+The bet: if fit/size doubt is easier to resolve in-app, and deferral is made explicit (including remaining uncertainty, and — in demo — labelled sample stock/recency as context, not a discount), more high-intent saves convert inside 30 days on-platform, at full price.

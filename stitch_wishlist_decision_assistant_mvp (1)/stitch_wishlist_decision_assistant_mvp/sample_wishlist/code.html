@@ -1,0 +1,307 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport"><title>AJIO Wishlist Decision Assistant</title><link href="https://fonts.googleapis.com" rel="preconnect"><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Manrope:wght@400;500;600;700&amp;display=swap" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config = { darkMode: 'class', theme: { extend: { colors: { 'background': '#fcf9f8', 'outline-variant': '#ddbfc3', 'inverse-surface': '#313030', 'secondary-fixed-dim': '#a1c9ff', 'on-secondary-container': '#285484', 'on-secondary-fixed': '#001c37', 'tertiary-fixed-dim': '#8cd5b3', 'on-primary-fixed': '#3f0015', 'on-secondary': '#ffffff', 'on-tertiary-fixed': '#002115', 'primary-container': '#8b1e3f', 'inverse-primary': '#ffb2bf', 'primary-fixed-dim': '#ffb2bf', 'outline': '#897174', 'on-error': '#ffffff', 'error-container': '#ffdad6', 'secondary-fixed': '#d2e4ff', 'on-primary-fixed-variant': '#871b3c', 'on-tertiary-container': '#80c8a7', 'surface-container-high': '#eae7e7', 'primary-fixed': '#ffd9de', 'on-tertiary': '#ffffff', 'on-primary-container': '#ff9db0', 'surface-tint': '#a73453', 'on-tertiary-fixed-variant': '#005139', 'surface-container-highest': '#e5e2e1', 'on-error-container': '#93000a', 'inverse-on-surface': '#f3f0ef', 'on-secondary-fixed-variant': '#194877', 'on-surface-variant': '#564145', 'surface-container-low': '#f6f3f2', 'surface-container': '#f0eded', 'surface-bright': '#fcf9f8', 'surface-variant': '#e5e2e1', 'tertiary-fixed': '#a8f2ce', 'tertiary-container': '#00553b', 'surface': '#fcf9f8', 'surface-dim': '#dcd9d9', 'on-background': '#1c1b1b', 'primary': '#6c0029', 'surface-container-lowest': '#ffffff', 'tertiary': '#003c29', 'on-primary': '#ffffff', 'secondary-container': '#a1c9ff', 'error': '#ba1a1a', 'on-surface': '#1c1b1b', 'secondary': '#366091' }, borderRadius: { 'DEFAULT': '0.25rem', 'lg': '0.5rem', 'xl': '0.75rem', 'full': '9999px' }, spacing: { 'space-md': '1rem', 'margin-desktop': '3rem', 'space-lg': '1.5rem', 'space-sm': '0.75rem', 'gutter-mobile': '1rem', 'space-2xs': '0.25rem', 'margin-mobile': '1.25rem', 'gutter-desktop': '1.5rem', 'space-xs': '0.5rem', 'space-3xl': '4.5rem', 'space-xl': '2rem', 'max-width-content': '72rem', 'space-2xl': '3rem' }, fontFamily: { 'body-lg': ['manrope'], 'body-sm': ['manrope'], 'display-lg-mobile': ['manrope'], 'headline-lg': ['manrope'], 'numerical-data': ['inter'], 'display-lg': ['manrope'], 'label-md': ['inter'], 'headline-sm': ['manrope'], 'body-md': ['manrope'], 'label-sm': ['inter'], 'headline-md': ['manrope'] }, fontSize: { 'body-lg': ['16px', { lineHeight: '26px', letterSpacing: '0em', fontWeight: '400' }], 'body-sm': ['13px', { lineHeight: '20px', letterSpacing: '0.005em', fontWeight: '400' }], 'display-lg-mobile': ['30px', { lineHeight: '38px', letterSpacing: '-0.015em', fontWeight: '600' }], 'headline-lg': ['28px', { lineHeight: '36px', letterSpacing: '-0.015em', fontWeight: '600' }], 'numerical-data': ['14px', { lineHeight: '20px', letterSpacing: '-0.01em', fontWeight: '500' }], 'display-lg': ['40px', { lineHeight: '48px', letterSpacing: '-0.02em', fontWeight: '600' }], 'label-md': ['12px', { lineHeight: '16px', letterSpacing: '0.04em', fontWeight: '500' }], 'headline-sm': ['18px', { lineHeight: '26px', letterSpacing: '-0.005em', fontWeight: '600' }], 'body-md': ['15px', { lineHeight: '24px', letterSpacing: '0em', fontWeight: '400' }], 'label-sm': ['11px', { lineHeight: '14px', letterSpacing: '0.06em', fontWeight: '600' }], 'headline-md': ['22px', { lineHeight: '30px', letterSpacing: '-0.01em', fontWeight: '600' }] } } } };</script><style>@layer base { html, body { width: 100vw; margin: 0; padding: 0; background-color: #fcf9f8; } body { overscroll-behavior: none; } .pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); } .pt-safe { padding-top: env(safe-area-inset-top, 0px); } main > :first-child { margin-top: 0 !important; } main > :last-child { margin-bottom: 0 !important; } } ::-webkit-scrollbar { display: none; }</style><style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head><body class="bg-surface font-body-md text-body-md text-on-surface min-h-screen flex flex-col antialiased selection:bg-primary-fixed selection:text-on-primary-fixed"><header class="fixed top-0 w-full z-50 pt-safe bg-surface/90 backdrop-blur-xl shadow-[0_1px_8px_rgba(0,0,0,0.03)]"><div class="h-44 flex flex-col justify-between px-margin-mobile pt-space-xs pb-space-xs"><div class="flex items-center justify-between min-h-[44px]"><div class="flex items-center gap-space-sm"><span class="font-headline-sm text-headline-sm tracking-tight text-on-surface font-bold">AJIO</span><div class="w-px h-5 bg-outline-variant/60"></div><div class="flex flex-col justify-center"><div class="flex items-center gap-space-xs"><span class="font-headline-sm text-headline-sm text-on-surface leading-tight">Wishlist Decision Assistant</span></div><span class="font-label-sm text-label-sm text-on-surface-variant font-normal leading-tight">Decide what fits. Know what to do next.</span></div></div><div class="flex items-center gap-space-xs pl-space-xs"><div class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-surface-container-low text-on-surface-variant text-label-sm font-label-sm"><span class="material-symbols-outlined text-[13px] text-primary">auto_awesome</span><span class="">AI-assisted</span></div><div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center shrink-0"><span class="material-symbols-outlined text-on-primary text-[18px]">person</span></div></div></div><nav class="w-full p-1 bg-surface-container rounded-lg flex items-center gap-1" data-active-classes="bg-surface-container-lowest text-primary font-headline-sm shadow-[0_1px_4px_rgba(0,0,0,0.04)]"><a aria-current="page" class="flex-1 min-h-[44px] flex items-center justify-center rounded-md transition-colors bg-surface-container-lowest text-primary font-headline-sm shadow-[0_1px_4px_rgba(0,0,0,0.04)]" data-path="sample-wishlist" href="#">Sample Wishlist</a><a class="flex-1 min-h-[44px] flex items-center justify-center rounded-md font-label-md text-label-md text-on-surface-variant hover:text-on-surface transition-colors" data-path="analyse-item" href="#">Analyse an Item</a></nav><div class="flex items-center gap-space-xs px-space-xs py-1.5 rounded-md bg-surface-container-low text-on-surface-variant"><span class="material-symbols-outlined text-[15px] shrink-0 text-secondary">info</span><p class="font-label-sm text-label-sm leading-tight text-on-surface-variant">Prototype with simulated products, sample reviews, and simulated availability. This assistant supports your decision using available signals, but cannot guarantee fit. Simulated stock is not live inventory.</p></div></div></header><main class="flex flex-col relative w-full px-margin-mobile pt-44 bg-surface pb-safe"><div class="flex flex-col w-full pb-16">
+<!-- Page Introduction -->
+<section class="flex flex-col gap-space-xs mt-space-md mb-space-lg">
+<h1 class="font-headline-md text-headline-md text-on-surface tracking-tight">
+      Your wishlist, with clearer next steps
+    </h1>
+<p class="font-body-md text-body-md text-on-surface-variant">
+      Fit signals, review evidence and your reason for saving each item are combined to help you decide.
+    </p>
+<!-- Research Insight Box -->
+<div class="mt-space-xs p-space-md rounded-lg bg-surface-container-low flex flex-col gap-1.5 shadow-[0_1px_4px_rgba(0,0,0,0.02)]">
+<div class="flex items-center gap-1.5 text-on-surface-variant">
+<span class="material-symbols-outlined text-[16px] text-primary">psychology</span>
+<span class="font-label-sm text-label-sm uppercase tracking-wider font-semibold text-primary">From user research</span>
+</div>
+<p class="font-body-sm text-body-sm text-on-surface leading-relaxed">
+<span class="font-semibold text-on-surface">Research insight:</span> Wishlisted products often stall while shoppers resolve fit, compare alternatives or wait for a relevant need.
+      </p>
+</div>
+</section>
+<!-- Size Profile Section -->
+<section class="mb-space-lg">
+<div class="bg-surface-container-lowest rounded-lg p-space-md shadow-[0_1px_6px_rgba(0,0,0,0.03)] flex flex-col gap-space-md">
+<div class="flex flex-col gap-1">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-[20px] text-primary">straighten</span>
+<h2 class="font-headline-sm text-headline-sm text-on-surface">Your size profile</h2>
+</div>
+<span class="font-label-sm text-label-sm text-tertiary flex items-center gap-1 bg-tertiary-fixed/30 px-2 py-0.5 rounded-full">
+<span class="material-symbols-outlined text-[13px]">lock</span> Private to session
+          </span>
+</div>
+<p class="font-body-sm text-body-sm text-on-surface-variant">
+          Enter this once to personalise fit guidance across your wishlist.
+        </p>
+</div>
+<!-- Controls Form -->
+<form class="grid grid-cols-1 sm:grid-cols-3 gap-space-sm" id="sizeProfileForm" onsubmit="event.preventDefault();">
+<div class="flex flex-col gap-1.5">
+<label class="font-label-md text-label-md text-on-surface-variant font-medium">Usual top size</label>
+<div class="relative bg-surface-container-low rounded-lg">
+<select class="w-full bg-transparent px-space-sm py-2 text-on-surface font-numerical-data text-numerical-data appearance-none focus:outline-none focus:bg-surface-container transition-colors" id="usualSizeSelect">
+<option value="XS">XS (Extra Small)</option>
+<option value="S">S (Small)</option>
+<option selected="" value="M">M (Medium)</option>
+<option value="L">L (Large)</option>
+<option value="XL">XL (Extra Large)</option>
+</select>
+<span class="material-symbols-outlined absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-on-surface-variant text-[18px]">arrow_drop_down</span>
+</div>
+</div>
+<div class="flex flex-col gap-1.5">
+<label class="font-label-md text-label-md text-on-surface-variant font-medium">Chest / Bust</label>
+<div class="flex items-center bg-surface-container-low rounded-lg px-space-sm py-1.5 focus-within:bg-surface-container transition-colors">
+<input class="w-full bg-transparent text-on-surface font-numerical-data text-numerical-data focus:outline-none" id="chestInput" max="56" min="26" type="number" value="40">
+<span class="font-label-sm text-label-sm text-on-surface-variant shrink-0 ml-1">inches</span>
+</div>
+</div>
+<div class="flex flex-col gap-1.5">
+<label class="font-label-md text-label-md text-on-surface-variant font-medium">Waist</label>
+<div class="flex items-center bg-surface-container-low rounded-lg px-space-sm py-1.5 focus-within:bg-surface-container transition-colors">
+<input class="w-full bg-transparent text-on-surface font-numerical-data text-numerical-data focus:outline-none" id="waistInput" max="52" min="22" type="number" value="32">
+<span class="font-label-sm text-label-sm text-on-surface-variant shrink-0 ml-1">inches</span>
+</div>
+</div>
+</form>
+<!-- Action Buttons & Subtext -->
+<div class="flex flex-wrap items-center justify-between gap-space-sm pt-2">
+<div class="flex items-center gap-space-sm">
+<button class="px-space-md py-2 bg-primary text-on-primary font-label-md text-label-md font-medium rounded-lg hover:bg-primary-container active:scale-[0.99] transition-all flex items-center gap-1.5 shadow-[0_1px_4px_rgba(108,0,41,0.2)]" id="updateFitBtn" type="button">
+<span class="material-symbols-outlined text-[16px]">sync</span>
+<span class="">Update fit guidance</span>
+</button>
+<button class="px-space-xs py-2 text-on-surface-variant hover:text-on-surface font-label-md text-label-md transition-colors underline-offset-4 hover:underline" id="resetFitBtn" type="button">
+            Reset
+          </button>
+</div>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Used only for this session.</span>
+</div>
+</div>
+</section>
+<!-- Wishlist Health Strip -->
+<section class="mb-space-lg">
+<div class="bg-surface-container p-space-sm rounded-lg flex flex-wrap items-center justify-between gap-2 shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
+<div class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-[18px] text-primary">bookmark_manager</span>
+<span class="font-headline-sm text-headline-sm text-on-surface">4 saved items</span>
+</div>
+<div class="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-label-md text-label-md text-on-surface-variant">
+<span class="inline-flex items-center gap-1 text-tertiary">
+<span class="w-2 h-2 rounded-full bg-tertiary"></span>
+<span class="">1 ready to decide</span>
+</span>
+<span class="text-outline-variant">•</span>
+<span class="inline-flex items-center gap-1 text-secondary">
+<span class="w-2 h-2 rounded-full bg-secondary"></span>
+<span class="">2 need another check</span>
+</span>
+<span class="text-outline-variant">•</span>
+<span class="inline-flex items-center gap-1 text-on-surface-variant">
+<span class="w-2 h-2 rounded-full bg-outline"></span>
+<span class="">1 worth waiting</span>
+</span>
+</div>
+</div>
+</section>
+<!-- 4 Product Decision Cards -->
+<section class="flex flex-col gap-space-lg">
+<!-- PRODUCT 1 -->
+<article class="bg-surface-container-lowest rounded-lg p-space-md shadow-[0_1px_6px_rgba(0,0,0,0.03)] flex flex-col gap-space-md transition-colors hover:shadow-[0_2px_12px_rgba(0,0,0,0.05)]">
+<!-- Item Meta Header -->
+<div class="flex flex-col sm:flex-row sm:items-start gap-space-sm">
+<div class="w-20 h-24 sm:w-24 sm:h-32 rounded-lg bg-surface-container-low shrink-0 overflow-hidden relative">
+<img class="w-full h-full object-cover" data-alt="High-end editorial studio still of a men's crisp slim-fit cotton formal button-up shirt in light sky blue, impeccably ironed, displayed on an architectural minimal concrete hanger with soft studio illumination and deep neutral shadows." src="https://lh3.googleusercontent.com/aida-public/AB6AXuDT49GXGiWllsJ56CZveDhygcvvwxZj8LPw33Ti0-mgpczJlfHyzFNAVBEUEV5XsWFKRRU0jJ8KkmFqyrAl5Y7f1rwKSfjBfjYyOkz-slzxwtZ4xVjhQwf0QCnY3Zps9yQGdnxpXrhwpPxrKLlT9trX74n_wJHe42ygOnrMvKjbYJYKRdU5a0sTjg1hv2b-XLdM1GeMvGQX6sGevaD-8sImwbOgibHf2oQW6CQxEmksx1DczsEDUhWu">
+<span class="absolute bottom-1 left-1 bg-surface/90 text-on-surface font-label-sm text-label-sm px-1 rounded backdrop-blur-sm">L</span>
+</div>
+<div class="flex-1 flex flex-col justify-between gap-1">
+<div class="flex flex-wrap items-center justify-between gap-1">
+<span class="font-label-sm text-label-sm tracking-wide uppercase text-on-surface-variant font-semibold">NETPLAY • Men’s Shirts</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Saved 5 days ago</span>
+</div>
+<h3 class="font-headline-sm text-headline-sm text-on-surface">Slim-Fit Cotton Work Shirt</h3>
+<div class="flex items-center gap-space-sm">
+<span class="font-numerical-data text-numerical-data font-semibold text-on-surface">₹1,499</span>
+<span class="font-label-sm text-label-sm px-2 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant">Simulated stock: Limited sizes (not live)</span>
+</div>
+<!-- Reason saved badge -->
+<div class="mt-1 flex items-center gap-1.5 text-on-surface bg-surface-container-low px-2.5 py-1 rounded-md">
+<span class="material-symbols-outlined text-[15px] text-primary">event_note</span>
+<span class="font-label-sm text-label-sm"><strong>Reason saved:</strong> For a client meeting next week</span>
+</div>
+</div>
+</div>
+<!-- Decision Matrix Grid -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-space-sm pt-1"><div class="bg-surface-container-low rounded-lg p-space-sm flex flex-col justify-between gap-space-xs"><div class="flex flex-col gap-1.5"><div class="flex items-center justify-between"><span class="font-label-sm text-label-sm uppercase tracking-wide text-on-surface-variant font-semibold">Panel 1 — Fit Confidence</span><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary-fixed text-on-secondary-fixed font-label-sm text-label-sm font-semibold"><span class="material-symbols-outlined text-[12px]">tune</span>Medium confidence</span></div><div class="flex flex-col"><span class="font-label-sm text-label-sm text-on-surface-variant">Suggested size based on available information</span><div class="font-headline-sm text-headline-sm text-primary font-semibold">Suggested size: L</div></div><p class="font-body-sm text-body-sm text-on-surface">Your 40-inch chest matches L, and the available reviews consistently describe a smaller fit.</p></div><div class="pt-2 text-on-surface-variant font-label-sm text-label-sm flex flex-col gap-0.5 border-t border-outline-variant/30 mt-1"><span class="font-semibold text-on-surface">Based on:</span><span class="">Brand size chart • 40-inch chest measurement • 2 simulated review snippets reporting smaller fit</span></div></div><div class="bg-surface-container-low rounded-lg p-space-sm flex flex-col justify-between gap-space-xs"><div class="flex flex-col gap-1.5"><div class="flex items-center justify-between"><span class="font-label-sm text-label-sm uppercase tracking-wide text-on-surface-variant font-semibold">Panel 2 — Buy or Wait?</span><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-tertiary-fixed text-on-tertiary-fixed font-label-sm text-label-sm font-semibold"><span class="material-symbols-outlined text-[12px]">check_circle</span>Ready to buy</span></div><p class="font-body-sm text-body-sm text-on-surface">You need it within 10 days, the fit evidence is consistent and no major question remains.</p><div class="flex items-baseline gap-1 text-on-surface font-body-sm text-body-sm"><span class="font-semibold text-primary">Next step:</span><span class="">Review once &amp; complete purchase.</span></div></div><div class="pt-2 text-on-surface-variant font-label-sm text-label-sm flex flex-col gap-0.5 border-t border-outline-variant/30 mt-1"><span class="font-semibold text-on-surface">Based on:</span><span class="">Upcoming client meeting • Medium fit confidence • No unresolved product question</span></div></div></div><div class="px-2 py-1 rounded bg-surface-container-low/70 text-on-surface-variant font-label-sm text-label-sm"><span class="font-semibold text-on-surface">Fit note:</span> Supports your decision based on provided data, but cannot guarantee actual fit.</div>
+<!-- Footer Actions -->
+<div class="flex items-center justify-end gap-space-md pt-1">
+<button class="text-on-surface hover:text-primary font-label-md text-label-md flex items-center gap-1 transition-colors" type="button">
+<span class="material-symbols-outlined text-[16px]">edit_note</span>
+<span class="">Update context</span>
+</button>
+<button class="text-primary font-label-md text-label-md font-semibold flex items-center gap-1 hover:underline" type="button">
+<span class="material-symbols-outlined text-[16px]">visibility</span>
+<span class="">View evidence</span>
+</button>
+</div>
+</article>
+<!-- PRODUCT 2 -->
+<article class="bg-surface-container-lowest rounded-lg p-space-md shadow-[0_1px_6px_rgba(0,0,0,0.03)] flex flex-col gap-space-md transition-colors hover:shadow-[0_2px_12px_rgba(0,0,0,0.05)]">
+<!-- Item Meta Header -->
+<div class="flex flex-col sm:flex-row sm:items-start gap-space-sm">
+<div class="w-20 h-24 sm:w-24 sm:h-32 rounded-lg bg-surface-container-low shrink-0 overflow-hidden relative">
+<img class="w-full h-full object-cover" data-alt="Editorial lookbook photograph of a women's refined printed straight kurta in muted terracotta and ecru motifs, handcrafted natural cotton weave, draped straight in peaceful ambient daylight." src="https://lh3.googleusercontent.com/aida-public/AB6AXuCOzc0ka3UJAJT8sbg_eC8YP_ZlxV92Hlu_F4_5sB2O8YtEUwStQv_VP-nxFJ9cdcj761msuFlaHtDcdudOrxKy4-JHQ28s2OHPh2a2cZmUiLM79T5bFXfoyAkDY3SgvlhinKeNbRppxdxZiDZx11DbPdOhkaueV7-hpT9g1GWensDAbGi0ZY0Oh3Ud6ym-F4VlhdnYMCQaqOEyJLEE6RQOz8hnmcohcEYUM4zgOqPX1jf0E5OlcPlU">
+<span class="absolute bottom-1 left-1 bg-surface/90 text-on-surface font-label-sm text-label-sm px-1 rounded backdrop-blur-sm">M</span>
+</div>
+<div class="flex-1 flex flex-col justify-between gap-1">
+<div class="flex flex-wrap items-center justify-between gap-1">
+<span class="font-label-sm text-label-sm tracking-wide uppercase text-on-surface-variant font-semibold">AURELIA • Women’s Ethnic Wear</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Saved 60 days ago</span>
+</div>
+<h3 class="font-headline-sm text-headline-sm text-on-surface">Printed Straight Kurta</h3>
+<div class="flex items-center gap-space-sm">
+<span class="font-numerical-data text-numerical-data font-semibold text-on-surface">₹1,799</span>
+<span class="font-label-sm text-label-sm px-2 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant">Simulated stock: In stock (not live)</span>
+</div>
+<!-- Reason saved badge -->
+<div class="mt-1 flex items-center gap-1.5 text-on-surface bg-surface-container-low px-2.5 py-1 rounded-md">
+<span class="material-symbols-outlined text-[15px] text-secondary">favorite_border</span>
+<span class="font-label-sm text-label-sm"><strong>Reason saved:</strong> Liked the design for a possible future event</span>
+</div>
+</div>
+</div>
+<!-- Decision Matrix Grid -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-space-sm pt-1"><div class="bg-surface-container-low rounded-lg p-space-sm flex flex-col justify-between gap-space-xs"><div class="flex flex-col gap-1.5"><div class="flex items-center justify-between"><span class="font-label-sm text-label-sm uppercase tracking-wide text-on-surface-variant font-semibold">Panel 1 — Fit Confidence</span><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-tertiary-fixed text-on-tertiary-fixed font-label-sm text-label-sm font-semibold"><span class="material-symbols-outlined text-[12px]">verified</span>High confidence</span></div><div class="flex flex-col"><span class="font-label-sm text-label-sm text-on-surface-variant">Suggested size based on available information</span><div class="font-headline-sm text-headline-sm text-tertiary font-semibold">Suggested size: M</div></div><p class="font-body-sm text-body-sm text-on-surface">Your usual size and the product reviews indicate a consistent true-to-size fit.</p></div><div class="pt-2 text-on-surface-variant font-label-sm text-label-sm flex flex-col gap-0.5 border-t border-outline-variant/30 mt-1"><span class="font-semibold text-on-surface">Based on:</span><span class="">Brand size chart • Usual size M • 3 simulated review snippets indicating true-to-size</span></div></div><div class="bg-surface-container-low rounded-lg p-space-sm flex flex-col justify-between gap-space-xs"><div class="flex flex-col gap-1.5"><div class="flex items-center justify-between"><span class="font-label-sm text-label-sm uppercase tracking-wide text-on-surface-variant font-semibold">Panel 2 — Buy or Wait?</span><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-surface-container-highest text-on-surface-variant font-label-sm text-label-sm font-semibold"><span class="material-symbols-outlined text-[12px]">hourglass_empty</span>Worth waiting</span></div><p class="font-body-sm text-body-sm text-on-surface">You still like the product, but there is no upcoming occasion or immediate need.</p><div class="flex items-baseline gap-1 text-on-surface font-body-sm text-body-sm"><span class="font-semibold text-primary">Next step:</span><span class="">Keep saved until a concrete occasion arises.</span></div></div><div class="pt-2 text-on-surface-variant font-label-sm text-label-sm flex flex-col gap-0.5 border-t border-outline-variant/30 mt-1"><span class="font-semibold text-on-surface">Based on:</span><span class="">No intended purchase date • No immediate occasion • Fit uncertainty resolved</span></div></div></div><div class="px-2 py-1 rounded bg-surface-container-low/70 text-on-surface-variant font-label-sm text-label-sm"><span class="font-semibold text-on-surface">Fit note:</span> Supports your decision based on provided data, but cannot guarantee actual fit.</div>
+<!-- Footer Actions -->
+<div class="flex items-center justify-end gap-space-md pt-1">
+<button class="text-on-surface hover:text-primary font-label-md text-label-md flex items-center gap-1 transition-colors" type="button">
+<span class="material-symbols-outlined text-[16px]">edit_note</span>
+<span class="">Update context</span>
+</button>
+<button class="text-primary font-label-md text-label-md font-semibold flex items-center gap-1 hover:underline" type="button">
+<span class="material-symbols-outlined text-[16px]">visibility</span>
+<span class="">View evidence</span>
+</button>
+</div>
+</article>
+<!-- PRODUCT 3 -->
+<article class="bg-surface-container-lowest rounded-lg p-space-md shadow-[0_1px_6px_rgba(0,0,0,0.03)] flex flex-col gap-space-md transition-colors hover:shadow-[0_2px_12px_rgba(0,0,0,0.05)]">
+<!-- Item Meta Header -->
+<div class="flex flex-col sm:flex-row sm:items-start gap-space-sm">
+<div class="w-20 h-24 sm:w-24 sm:h-32 rounded-lg bg-surface-container-low shrink-0 overflow-hidden relative">
+<img class="w-full h-full object-cover" data-alt="Still life photo of folded dark indigo skinny stretch jeans with authentic copper rivets, resting on raw textured sandstone in soft diffused studio light." src="https://lh3.googleusercontent.com/aida-public/AB6AXuCCcSCYpOokgNfRRlK5_P4OK6jUq4hI05iNS1IAJoWSfVSDWyOkqalmlds1QtYO07tvrf8RtBbfla7IRPbvMSByqHM_em0bZxAmBw_u6GkF4zCjAcEaQfPJYt41hpomvEfbJcwODIs-dWvJHcuo7ucG5H8awtTz20bWBinSS8EfMCjUWr2r9_4gmTp1arK2yQanSqLfnf5gOAmERU7P-UrNT6BfCUMt_W8cASygcNiZ46MjBb-x3hyL">
+<span class="absolute bottom-1 left-1 bg-surface/90 text-on-surface font-label-sm text-label-sm px-1 rounded backdrop-blur-sm">32</span>
+</div>
+<div class="flex-1 flex flex-col justify-between gap-1">
+<div class="flex flex-wrap items-center justify-between gap-1">
+<span class="font-label-sm text-label-sm tracking-wide uppercase text-on-surface-variant font-semibold">DNMX • Jeans</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Saved 150 days ago</span>
+</div>
+<h3 class="font-headline-sm text-headline-sm text-on-surface">Skinny-Fit Stretch Jeans</h3>
+<div class="flex items-center gap-space-sm">
+<span class="font-numerical-data text-numerical-data font-semibold text-on-surface">₹1,699</span>
+<span class="font-label-sm text-label-sm px-2 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant">Simulated stock: In stock (not live)</span>
+</div>
+<!-- Reason saved badge -->
+<div class="mt-1 flex items-center gap-1.5 text-on-surface bg-surface-container-low px-2.5 py-1 rounded-md">
+<span class="material-symbols-outlined text-[15px] text-outline">tune</span>
+<span class="font-label-sm text-label-sm"><strong>Reason saved:</strong> Wanted a versatile pair of dark jeans</span>
+</div>
+</div>
+</div>
+<!-- Decision Matrix Grid -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-space-sm pt-1"><div class="bg-surface-container-low rounded-lg p-space-sm flex flex-col justify-between gap-space-xs"><div class="flex flex-col gap-1.5"><div class="flex items-center justify-between"><span class="font-label-sm text-label-sm uppercase tracking-wide text-on-surface-variant font-semibold">Panel 1 — Fit Confidence</span><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-error-container text-on-error-container font-label-sm text-label-sm font-semibold"><span class="material-symbols-outlined text-[12px]">help_outline</span>Low confidence</span></div><div class="flex flex-col"><span class="font-label-sm text-label-sm text-on-surface-variant">Suggested size based on available information</span><div class="font-headline-sm text-headline-sm text-error font-semibold">Check fit before choosing</div></div><p class="font-body-sm text-body-sm text-on-surface">The available reviews conflict: some shoppers report a smaller fit while others describe it as true to size.</p></div><div class="pt-2 text-on-surface-variant font-label-sm text-label-sm flex flex-col gap-0.5 border-t border-outline-variant/30 mt-1"><span class="font-semibold text-on-surface">Based on:</span><span class="">Numeric waist chart • Conflicting simulated review snippets • Missing fabric-stretch preference</span></div></div><div class="bg-surface-container-low rounded-lg p-space-sm flex flex-col justify-between gap-space-xs"><div class="flex flex-col gap-1.5"><div class="flex items-center justify-between"><span class="font-label-sm text-label-sm uppercase tracking-wide text-on-surface-variant font-semibold">Panel 2 — Buy or Wait?</span><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary-fixed text-on-secondary-fixed font-label-sm text-label-sm font-semibold"><span class="material-symbols-outlined text-[12px]">priority_high</span>Check one thing first</span></div><p class="font-body-sm text-body-sm text-on-surface">Fit remains unresolved, so a confident purchase recommendation would be unreliable.</p><div class="flex items-baseline gap-1 text-on-surface font-body-sm text-body-sm"><span class="font-semibold text-primary">Next step:</span><span class="">Check waist &amp; stretch data before deciding.</span></div></div><div class="pt-2 text-on-surface-variant font-label-sm text-label-sm flex flex-col gap-0.5 border-t border-outline-variant/30 mt-1"><span class="font-semibold text-on-surface">Based on:</span><span class="">Low fit confidence • Conflicting simulated review snippets • Item saved for 150 days</span></div></div></div><div class="px-2 py-1 rounded bg-surface-container-low/70 text-on-surface-variant font-label-sm text-label-sm"><span class="font-semibold text-on-surface">Fit note:</span> Supports your decision based on provided data, but cannot guarantee actual fit.</div>
+<!-- Footer Actions -->
+<div class="flex items-center justify-end gap-space-md pt-1">
+<button class="text-on-surface hover:text-primary font-label-md text-label-md flex items-center gap-1 transition-colors" type="button">
+<span class="material-symbols-outlined text-[16px]">edit_note</span>
+<span class="">Update context</span>
+</button>
+<button class="text-primary font-label-md text-label-md font-semibold flex items-center gap-1 hover:underline" type="button">
+<span class="material-symbols-outlined text-[16px]">visibility</span>
+<span class="">View evidence</span>
+</button>
+</div>
+</article>
+<!-- PRODUCT 4 -->
+<article class="bg-surface-container-lowest rounded-lg p-space-md shadow-[0_1px_6px_rgba(0,0,0,0.03)] flex flex-col gap-space-md transition-colors hover:shadow-[0_2px_12px_rgba(0,0,0,0.05)]">
+<!-- Item Meta Header -->
+<div class="flex flex-col sm:flex-row sm:items-start gap-space-sm">
+<div class="w-20 h-24 sm:w-24 sm:h-32 rounded-lg bg-surface-container-low shrink-0 overflow-hidden relative">
+<img class="w-full h-full object-cover" data-alt="Clean editorial product photo of an elegant black solid A-line midi dress with subtle waist shaping, photographed hanging against a neutral cream canvas studio wall." src="https://lh3.googleusercontent.com/aida-public/AB6AXuAwwjDM7ZtfuzHuv3jf_AF3FHuJwIT_Hwy0LgK5DdRaorwxr4PshwJ47hUa_P-3E8E1B4ffjQ38SHZrt8X7YQbeJ6ph4_3-KFVAAEWKqI4k6OTd-Z_Uqbx1b-Kl8bqY0aLq-_EaaAaWJf8L0y1DdWGrI1DSpFr0ePY6PJSU90smJUXAHgptXgIdjWZW0IWUglbHfe_184s6ubSxtbyaP5klKxQfkC3PxNDbfjqjN1cEXn-CuwTV4bcM">
+<span class="absolute bottom-1 left-1 bg-surface/90 text-on-surface font-label-sm text-label-sm px-1 rounded backdrop-blur-sm">M</span>
+</div>
+<div class="flex-1 flex flex-col justify-between gap-1">
+<div class="flex flex-wrap items-center justify-between gap-1">
+<span class="font-label-sm text-label-sm tracking-wide uppercase text-on-surface-variant font-semibold">AND • Women’s Dresses</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Saved 12 days ago</span>
+</div>
+<h3 class="font-headline-sm text-headline-sm text-on-surface">Solid A-Line Midi Dress</h3>
+<div class="flex items-center gap-space-sm">
+<span class="font-numerical-data text-numerical-data font-semibold text-on-surface">₹2,499</span>
+<span class="font-label-sm text-label-sm px-2 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant">Simulated stock: Limited sizes (not live)</span>
+</div>
+<!-- Reason saved badge -->
+<div class="mt-1 flex items-center gap-1.5 text-on-surface bg-surface-container-low px-2.5 py-1 rounded-md">
+<span class="material-symbols-outlined text-[15px] text-primary">restaurant</span>
+<span class="font-label-sm text-label-sm"><strong>Reason saved:</strong> Shortlisted for a dinner event</span>
+</div>
+</div>
+</div>
+<!-- Decision Matrix Grid -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-space-sm pt-1"><div class="bg-surface-container-low rounded-lg p-space-sm flex flex-col justify-between gap-space-xs"><div class="flex flex-col gap-1.5"><div class="flex items-center justify-between"><span class="font-label-sm text-label-sm uppercase tracking-wide text-on-surface-variant font-semibold">Panel 1 — Fit Confidence</span><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-tertiary-fixed text-on-tertiary-fixed font-label-sm text-label-sm font-semibold"><span class="material-symbols-outlined text-[12px]">verified</span>High confidence</span></div><div class="flex flex-col"><span class="font-label-sm text-label-sm text-on-surface-variant">Suggested size based on available information</span><div class="font-headline-sm text-headline-sm text-tertiary font-semibold">Suggested size: M</div></div><p class="font-body-sm text-body-sm text-on-surface">Your measurement and the available true-to-size reviews point to the same size.</p></div><div class="pt-2 text-on-surface-variant font-label-sm text-label-sm flex flex-col gap-0.5 border-t border-outline-variant/30 mt-1"><span class="font-semibold text-on-surface">Based on:</span><span class="">Brand size chart • User measurement • Consistent simulated review snippets</span></div></div><div class="bg-surface-container-low rounded-lg p-space-sm flex flex-col justify-between gap-space-xs"><div class="flex flex-col gap-1.5"><div class="flex items-center justify-between"><span class="font-label-sm text-label-sm uppercase tracking-wide text-on-surface-variant font-semibold">Panel 2 — Buy or Wait?</span><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary-fixed text-on-secondary-fixed font-label-sm text-label-sm font-semibold"><span class="material-symbols-outlined text-[12px]">compare_arrows</span>Compare first</span></div><p class="font-body-sm text-body-sm text-on-surface">You are still considering another shortlisted dress, so the remaining question is product preference rather than fit.</p><div class="flex items-baseline gap-1 text-on-surface font-body-sm text-body-sm"><span class="font-semibold text-primary">Next step:</span><span class="">Compare fabric &amp; styling with alternative.</span></div></div><div class="pt-2 text-on-surface-variant font-label-sm text-label-sm flex flex-col gap-0.5 border-t border-outline-variant/30 mt-1"><span class="font-semibold text-on-surface">Based on:</span><span class="">Active alternative under consideration • High fit confidence • Upcoming dinner event</span></div></div></div><div class="px-2 py-1 rounded bg-surface-container-low/70 text-on-surface-variant font-label-sm text-label-sm"><span class="font-semibold text-on-surface">Fit note:</span> Supports your decision based on provided data, but cannot guarantee actual fit.</div>
+<!-- Footer Actions -->
+<div class="flex items-center justify-end gap-space-md pt-1">
+<button class="text-on-surface hover:text-primary font-label-md text-label-md flex items-center gap-1 transition-colors" type="button">
+<span class="material-symbols-outlined text-[16px]">edit_note</span>
+<span class="">Update context</span>
+</button>
+<button class="text-primary font-label-md text-label-md font-semibold flex items-center gap-1 hover:underline" type="button">
+<span class="material-symbols-outlined text-[16px]">visibility</span>
+<span class="">View evidence</span>
+</button>
+</div>
+</article>
+</section>
+</div>
+<script>
+  (function() {
+    const updateBtn = document.getElementById('updateFitBtn');
+    const resetBtn = document.getElementById('resetFitBtn');
+    const usualSize = document.getElementById('usualSizeSelect');
+    const chestInput = document.getElementById('chestInput');
+    const waistInput = document.getElementById('waistInput');
+
+    if (updateBtn) {
+      updateBtn.addEventListener('click', () => {
+        const originalText = updateBtn.innerHTML;
+        updateBtn.innerHTML = '<span class="material-symbols-outlined text-[16px] animate-spin">sync</span><span>Recalculating...</span>';
+        updateBtn.disabled = true;
+        setTimeout(() => {
+          updateBtn.innerHTML = '<span class="material-symbols-outlined text-[16px]">check</span><span>Fit updated</span>';
+          setTimeout(() => {
+            updateBtn.innerHTML = originalText;
+            updateBtn.disabled = false;
+          }, 1500);
+        }, 450);
+      });
+    }
+
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        if (usualSize) usualSize.value = 'M';
+        if (chestInput) chestInput.value = '40';
+        if (waistInput) waistInput.value = '32';
+      });
+    }
+  })();
+</script></main>
+
+</body></html>
