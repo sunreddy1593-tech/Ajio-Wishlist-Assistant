@@ -152,7 +152,7 @@ comparison, gaps    │  No key / Groq HTTP fail: labelled rule      │
 | **Next-action engine (demo)** | Situation → `decision_status`, `decision_reason`, `next_step`, `evidence_used` |
 | **Wishlist health** | Demo strip: saved count, ready to decide, need another check, worth waiting |
 | **Item detail** | Same engines; shows save context, chart measurements, simulated reviews, evidence |
-| **Live adapter** | Build prompt from **all** custom form fields, one Groq call, strip fences, `json.loads`, schema check. Unknown enums are parse failures, not silent Needs more information |
+| **Live adapter** | Build prompt from **all** custom form fields, one Groq call (`max_tokens=1500`, compact json_schema), strip fences, `json.loads`, schema check. Compact `buy_or_wait` JSON is mapped onto the two-panel keys. Unknown enums are parse failures, not silent Needs more information |
 | **Rule fallback** | Deterministic `compute_fit` / `compute_next_action` on the submitted payload when Groq is unavailable. Label: *Rule-based fallback — live AI analysis unavailable.* `is_live=False` even after item identity is copied onto the result |
 | **Evidence formatter** | `format_decision_evidence` translates internal engine keys before any shopper-facing list (wishlist + detail) |
 | **Custom evidence formatter** | `custom_evidence_lines` rewrites each cited label as a sentence quoting the supplied value — chart row for the suggested size, body measurements, review signals, usual size, occasion timing, price, availability. Drops a label when the value is absent |
@@ -194,8 +194,8 @@ Seeded items are four **research-backed scenarios**, all labelled fictional / si
 - Required: product name, category, usual size, and **at least one** of size chart, a body measurement, or fit-related reviews. Empty strings and zero measurements become `None` and are not treated as present.
 - Optional: brand, price, size chart, reviews, availability notes (user-reported, not live inventory), measurements, why saved, occasion, timing, open uncertainties, comparison, extra context. Every field is sent to Groq when a call is made.
 - Missing key: analyse page shows *Live AI analysis is unavailable because the deployment secret is not configured.* Submit still runs the **rule-based fallback** on the payload. Sample Wishlist is unaffected.
-- **One** `chat.completions.create` when a key exists: `temperature=0.2`, `max_tokens=700`, no stream, no tools. Model: `openai/gpt-oss-120b`.
-- The call requests **strict structured output** (`response_format` `json_schema`, name `wishlist_item_analysis`, `ANALYSIS_SCHEMA`), so the model is constrained to the exact keys and enum values instead of being asked politely for them.
+- **One** `chat.completions.create` when a key exists: `temperature=0.2`, `max_tokens=1500` (`GROQ_MAX_TOKENS`), no stream, no tools. Model: `openai/gpt-oss-120b`. A 700-token cap truncated json_schema output (`json_validate_failed`).
+- The call requests **strict structured output** (`response_format` `json_schema`, name `wishlist_item_analysis`, compact `ANALYSIS_SCHEMA`: `fit_recommendation`, `fit_confidence`, short `fit_reason` / `buy_wait_reason`, `buy_or_wait`, `info_to_check` max 3). The prompt says keep every field concise and return only JSON. The normalizer maps that onto the two-panel UI fields; leftover full replies with `decision_status` are still accepted.
 - The prompt still asks for JSON only. Optional ` ```json ` fences are stripped, then parsed and schema-checked, so an endpoint that ignores `response_format` is still handled.
 - Three failure states that must not be collapsed into one another (`failure_kind`):
   - **`validation_error`** — the submitted payload is genuinely incomplete → Needs more information, listing only fields validation confirmed are absent.
@@ -204,7 +204,7 @@ Seeded items are four **research-backed scenarios**, all labelled fictional / si
 - Only `validation_error` may tell the shopper that information is missing. Neither `processing_error` nor `service_error` is converted into a Low fit-confidence verdict.
 - A missing key is treated as configuration, not an outage: rule fallback with the secret-missing banner (`fallback_cause = no_secret`).
 - **Recovery from a failure state is two buttons, and neither rebuilds the form.** `retry_saved_analysis()` (primary, *Retry analysis*) calls the adapter again with the stored `custom_analysis_payload` and stays on the result page; with no stored payload it records a `validation_error` result rather than navigating away. `edit_saved_analysis()` (secondary, *Edit my information*) restores the widgets from that payload, clears the stale result, and routes to `view=analyse`.
-- Failures never show a traceback or the API key in the UI. Logs carry a context string, the exception type name, and `exc_info` for diagnosis — tracebacks print source lines, never local values, so the key and the customer payload stay out of the log.
+- Failures never show a traceback or the API key in the UI. Logs carry a context string, the exception type name, and `exc_info` for diagnosis. `call_groq` also logs `repr(exc)` plus HTTP `status` / `body` when the SDK exposes them, so a Cloud truncation error is visible without putting the key or payload in the log.
 
 ---
 
@@ -291,26 +291,25 @@ Comparison is evaluated **before** missing-info so an active comparison is the a
 
 ## 9. Live contract (Groq)
 
-**Model:** `openai/gpt-oss-120b`
+**Model:** `openai/gpt-oss-120b`  
+**Completion budget:** `max_tokens=1500` (`GROQ_MAX_TOKENS`). Keep the schema compact; evidence arrays on the Groq contract truncated the document.
 
-**System role:** wishlist decision assistant. Use only supplied fields. Do not invent blockers, scarcity, or price-watching. Do not treat stock notes as live inventory or as the sole reason to buy. Do not recommend discounts. Do not ask the shopper to add a size chart, reviews, or measurements when those fields are already supplied. If evidence is insufficient, use **Needs more information**.
+**System role:** wishlist decision assistant. Use only supplied fields. Do not invent blockers, scarcity, or price-watching. Do not treat stock notes as live inventory or as the sole reason to buy. Do not recommend discounts. Do not ask the shopper to add a size chart, reviews, or measurements when those fields are already supplied. If evidence is insufficient, use **Needs more information**. Keep every field concise; respond with only the JSON object.
 
-**Response schema**
+**Response schema** (what Groq is asked to emit)
 
 ```json
 {
   "fit_recommendation": "string",
   "fit_confidence": "High | Medium | Low",
-  "fit_reason": "string",
-  "fit_evidence_used": ["string"],
-  "decision_status": "Ready to buy | Check one thing first | Compare first | Worth waiting | Reconsider this save | Needs more information",
-  "decision_reason": "string",
-  "next_step": "string",
-  "decision_evidence_used": ["string"]
+  "fit_reason": "<=25 words",
+  "buy_or_wait": "Ready to buy | Check one thing first | Compare first | Worth waiting | Reconsider this save | Needs more information",
+  "buy_wait_reason": "<=25 words",
+  "info_to_check": ["max 3 short items"]
 }
 ```
 
-The UI maps this onto the same two panels as demo. Unknown `fit_confidence` or `decision_status` values fail schema validation (processing error), not a silent Needs more information fallback.
+The normalizer maps `buy_or_wait` → `decision_status`, `buy_wait_reason` → `decision_reason`, and `info_to_check` → `next_step` so the UI still renders the two panels. If `info_to_check` is empty, `next_step` falls back to `buy_wait_reason` rather than asking for already-submitted fields. Leftover full replies (`decision_status`, evidence arrays) are still accepted. Unknown `fit_confidence` or `buy_or_wait` / `decision_status` values fail schema validation (processing error), not a silent Needs more information fallback.
 
 Shopper-facing evidence lists run through `format_decision_evidence` (wishlist, detail) or `custom_evidence_lines` (Analyse an Item) so engine keys such as `comparison_status: comparing` never appear as raw text, and JSON-shaped rows are discarded rather than printed.
 
@@ -414,7 +413,7 @@ Four views, one Streamlit page. Body text is ~15px. Statuses always include word
 | --- | --- | --- |
 | Genuine missing fields | `validation_error` | Needs more information listing only fields validation confirmed are absent |
 | Empty, unreadable, or schema-invalid model JSON | `processing_error` | *The analysis response could not be processed. Please try again.* — no verdict, not Needs more information, no traceback |
-| Groq auth / network / rate limit / outage | `rule_fallback` with `fallback_cause = service_error` | Rule-based panels from the submitted payload, under a *Live analysis is temporarily unavailable* banner |
+| Groq auth / network / rate limit / outage / HTTP 400 `json_validate_failed` | `rule_fallback` with `fallback_cause = service_error` | Rule-based panels from the submitted payload, under a *Live analysis is temporarily unavailable* banner. `call_groq` logs the original status and body |
 | No Groq key | `rule_fallback` with `fallback_cause = no_secret` | Sample Wishlist works. Analyse shows the secret-missing warning. Submit returns rule-based panels under the same warning |
 | Sample JSON missing | — | Error in the page, no traceback |
 | **Retry analysis** | unchanged until the call returns | Re-runs the adapter on the stored payload, in place. Form widgets are never re-read, so a retry cannot drop submitted values |

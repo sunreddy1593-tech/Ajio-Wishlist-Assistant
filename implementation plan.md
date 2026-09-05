@@ -69,7 +69,7 @@ This is the **as-built** plan for the standalone Streamlit MVP. It is not a disc
 
 Layout *inside* `streamlit_app.py`:
 
-1. Constants (sizes, keywords, model, system prompt, status vocab, parse/fallback labels)
+1. Constants (sizes, keywords, model, `GROQ_MAX_TOKENS`, compact Groq schema, system prompt, status vocab, parse/fallback labels)
 2. Sample load + `get_groq_api_key()` from secrets only
 3. Demo fit engine (`compute_fit`)
 4. Demo next-action engine (`compute_next_action`, optional `gaps=`)
@@ -166,9 +166,9 @@ Decorative sample photos are in the UI. They are not a live catalogue. Layout ch
 2. Form always visible as one `st.form`. Submit builds the payload immediately, then `validate_custom_payload` on **that** object. Empty strings and zero measurements become `None`.
 3. Required: product name, category, usual size, and **at least one** of size chart, a body measurement, or fit-related reviews. Every `CUSTOM_PAYLOAD_FIELDS` value is sent to Groq when a call is made.
 4. No key: analyse page shows `SECRET_MISSING_MESSAGE`; submit still runs `compute_custom_analysis_fallback`. Sample Wishlist is unaffected.
-5. One `Groq` client call, imported **inside** the call path: model `openai/gpt-oss-120b`, `temperature=0.2`, `max_tokens=700`, no stream, no tools, and `response_format` strict `json_schema` built from `ANALYSIS_SCHEMA`.
-6. System prompt: already-saved item; only supplied fields; **no discounts**; no invented scarcity or price-watching; stock notes are not live inventory and not the sole reason to buy; do not ask for a size chart, reviews, or measurements that were already supplied.
-7. Strip code fences → parse JSON → `validate_live_schema` / `normalize_live_result`. **Unknown enums raise `GroqParseError`** — they are not coerced to Needs more information. Aliases such as `Buy now` → Ready to buy are still accepted.
+5. One `Groq` client call, imported **inside** the call path: model `openai/gpt-oss-120b`, `temperature=0.2`, `max_tokens=1500`, no stream, no tools, and `response_format` strict `json_schema` built from the compact `ANALYSIS_SCHEMA` (`fit_recommendation`, `fit_confidence`, short `fit_reason` / `buy_wait_reason`, `buy_or_wait`, `info_to_check`).
+6. System prompt: already-saved item; only supplied fields; **no discounts**; no invented scarcity or price-watching; stock notes are not live inventory and not the sole reason to buy; do not ask for a size chart, reviews, or measurements that were already supplied; keep every field concise and return only JSON.
+7. Strip code fences → parse JSON → `validate_live_schema` / `normalize_live_result`. Compact Groq fields are mapped onto the two-panel UI keys. **Unknown enums raise `GroqParseError`** — they are not coerced to Needs more information. Aliases such as `Buy now` → Ready to buy are still accepted on leftover full replies.
 8. Three failure states that must not collapse into one another:
    - **`validation_error`** — the payload really is incomplete → `_validation_error_result`, Needs more information with the absent fields.
    - **`processing_error`** — reply could not be parsed or schema-validated → `_processing_error_result` (`PARSE_FAILED_MESSAGE`). No verdict is issued.
@@ -176,7 +176,7 @@ Decorative sample photos are in the UI. They are not a live catalogue. Layout ch
 9. A missing key is configuration, not an outage: same rule fallback with `cause=NO_SECRET`, bannered with `SECRET_MISSING_MESSAGE`.
 10. Only `validation_error` may say information is missing. Neither of the other two becomes a Low fit-confidence verdict.
 11. `live_next_steps` asks only for fields that were not submitted. Processing / service / no-secret → “Please try again”.
-12. Failures never show a traceback or the API key in the UI. `_log_adapter_error` logs a context string plus the exception type name with `exc_info` attached; tracebacks print source lines, never local values, so the key and payload stay unlogged (`DEBUG_MODE = False`).
+12. Failures never show a traceback or the API key in the UI. `_log_adapter_error` logs a context string plus the exception type name with `exc_info` attached; `call_groq` also logs `repr(exc)` and, when present, HTTP `status` / `body` so a Cloud `json_validate_failed` is visible in Streamlit logs. Tracebacks print source lines, never local values, so the key and payload stay unlogged (`DEBUG_MODE = False`).
 
 ### 3.6 Recovery: retry, edit, and evidence copy
 
@@ -214,8 +214,8 @@ Decorative sample photos are in the UI. They are not a live catalogue. Layout ch
 - `mvp/requirements.txt`: `streamlit`, `groq`
 - `mvp/README.md`: local run, secrets, Community Cloud
 - Root `.gitignore`: `.streamlit/secrets.toml`, `.env`, venv, `__pycache__`
-- `tests/test_engines.py`: fit, decision, shopper copy, live normalizer, demo-without-key, no-discount, custom-analysis flow, Groq adapter, rule fallback, evidence formatter, measurement evidence, navigation, the six deployment-failure cases, custom-evidence copy (`CustomEvidenceTests`), a ten-item regression checklist (`CustomAnalysisRegressionTests`), and analyse-page copy / example-loader checks (callout text, required vs optional labels, `load_example_analyse_form` prefills without submitting, example payload validates, Load button sits outside the form)
-- `CustomAnalysisRegressionTests` pins, one test per item: strict/fully-required/closed response schema (asserted on the captured request, not only the constant), valid JSON passing validation, missing response fields → `processing_error`, invalid enums → `processing_error`, Groq failure → `service_error`, a valid payload never producing `validation_error`, retry using the exact stored payload object, retry not rebuilding from blank widgets (`build_custom_analysis_payload` asserted uncalled), edit restoring chest / waist / usual size / chart / reviews / save reason / timing, and chest 40 surviving a retry followed by an edit
+- `tests/test_engines.py`: fit, decision, shopper copy, live normalizer, demo-without-key, no-discount, custom-analysis flow, Groq adapter, rule fallback, evidence formatter, measurement evidence, navigation, the six deployment-failure cases, custom-evidence copy (`CustomEvidenceTests`), a ten-item regression checklist (`CustomAnalysisRegressionTests`), analyse-page copy / example-loader checks, compact Groq JSON mapping (`test_02b_compact_groq_json_maps_onto_the_two_panels`), and `max_tokens >= 1024`
+- `CustomAnalysisRegressionTests` pins, one test per item: strict/fully-required/closed **compact** Groq schema (`GROQ_RESPONSE_KEYS`, no evidence arrays; asserted on the captured request), valid JSON passing validation, compact JSON mapping onto the two panels, missing response fields → `processing_error`, invalid enums → `processing_error`, Groq failure → `service_error`, a valid payload never producing `validation_error`, retry using the exact stored payload object, retry not rebuilding from blank widgets (`build_custom_analysis_payload` asserted uncalled), edit restoring chest / waist / usual size / chart / reviews / save reason / timing, and chest 40 surviving a retry followed by an edit
 
 ---
 
@@ -235,20 +235,20 @@ Decorative sample photos are in the UI. They are not a live catalogue. Layout ch
 
 ## 5. Groq JSON contract (as shipped)
 
+Groq is asked for a compact object so json_schema output fits in `max_tokens=1500`:
+
 ```json
 {
   "fit_recommendation": "string",
   "fit_confidence": "High | Medium | Low",
-  "fit_reason": "string",
-  "fit_evidence_used": ["string"],
-  "decision_status": "Ready to buy | Check one thing first | Compare first | Worth waiting | Reconsider this save | Needs more information",
-  "decision_reason": "string",
-  "next_step": "string",
-  "decision_evidence_used": ["string"]
+  "fit_reason": "<=25 words",
+  "buy_or_wait": "Ready to buy | Check one thing first | Compare first | Worth waiting | Reconsider this save | Needs more information",
+  "buy_wait_reason": "<=25 words",
+  "info_to_check": ["max 3 short items"]
 }
 ```
 
-The older `buy_or_wait` / `info_to_check` contract is not what the prompt asks for. The normalizer still maps leftover aliases (`Buy now`, `Wait`, `Needs more info`) so a messy but **valid** reply can render. Values that are not in the allowed set after mapping fail schema validation (`GroqParseError`) and become a processing error — they are **not** silently rewritten to Needs more information.
+`normalize_live_result` maps that onto the two-panel keys (`decision_status`, `decision_reason`, `next_step`). Empty `info_to_check` uses `buy_wait_reason` (or a generic “review the panels” line) rather than asking for fields the shopper already submitted. Leftover full replies that still include `decision_status` / evidence arrays are also accepted. Aliases such as `Buy now` → Ready to buy are mapped. Values that are not in the allowed set after mapping fail schema validation (`GroqParseError`) and become a processing error — they are **not** silently rewritten to Needs more information.
 
 ---
 
@@ -272,6 +272,7 @@ The older `buy_or_wait` / `info_to_check` contract is not what the prompt asks f
 - **Evidence must not out-claim the payload.** If the model cites a size chart that was never pasted, drop the line. Do not paraphrase it into something that sounds supplied.
 - **Internal hops are buttons.** Markdown/HTML query-string links open a new Streamlit session in a new tab.
 - **Health counts statuses**, not “how many are low in stock.”
+- **Do not shrink Groq `max_tokens` below 1024, and do not put evidence arrays back on `ANALYSIS_SCHEMA`.** `json_validate_failed` / “max completion tokens reached before generating a valid document” was truncation. The compact contract (`GROQ_RESPONSE_KEYS`) plus `GROQ_MAX_TOKENS = 1500` is what lets json_schema finish.
 - **Do not invent Notify-me, accounts, or live inventory** — they are not in this MVP.
 
 ---
@@ -305,7 +306,7 @@ The older `buy_or_wait` / `info_to_check` contract is not what the prompt asks f
 | # | Check |
 | --- | --- |
 | L1 | No key: analyse page shows the secret-missing warning; submit still returns a labelled rule fallback on the payload; Sample Wishlist still works |
-| L2 | With key: submit a pasted item → same two panels (or a processing error / labelled fallback — never a traceback) |
+| L2 | With key: submit a pasted item → same two panels from a **parsed** compact Groq JSON (or a processing error / labelled fallback — never a traceback, never a raw `json_validate_failed`) |
 | L3 | Missing product name, category, or usual size: validation warning, no requirement to call the API |
 | L4 | Complete paste (name, category, usual size, chart, reviews, measurements, occasion): Groq receives those fields; result is **not** Needs more information |
 | L5 | Missing only fit evidence: Needs more information lists that gap only — not name/category/usual size |
@@ -324,12 +325,13 @@ The older `buy_or_wait` / `info_to_check` contract is not what the prompt asks f
 | L18 | Product block is titled **Product evidence — auto-filled in the integrated experience**; Product Name / Category / Usual Size are labelled required; Size Chart, Review Snippets, Chest/Bust, and Waist are labelled optional, improves confidence; Current Price and Availability Notes are labelled optional |
 | L19 | **Load an example item** is a secondary button outside the form; it prefills product, size chart, two reviews, size profile, save reason, and occasion timing; it does not submit or call an API |
 | L20 | **Analyse this item** remains the primary form submit |
+| L21 | With key, a complete paste returns a **parsed** live result (two panels), not a `json_validate_failed` truncation; Groq HTTP failure still uses the labelled rule fallback |
 
 ### Automated suite
 
 From the repository root: `python -m unittest tests.test_engines`
 
-Covers fit confidence (including M + runs-small → L is Medium), next-action constraints, no-discount copy, custom-analysis flow, Groq adapter, rule fallback, evidence formatter, measurement rendering, same-tab nav helpers, the six deployment-failure cases in `DeploymentFailureTests`, custom-evidence copy in `CustomEvidenceTests`, and the ten-item `CustomAnalysisRegressionTests` checklist.
+Covers fit confidence (including M + runs-small → L is Medium), next-action constraints, no-discount copy, custom-analysis flow, Groq adapter (`max_tokens` 1500, compact schema), rule fallback, evidence formatter, measurement rendering, same-tab nav helpers, the six deployment-failure cases in `DeploymentFailureTests`, custom-evidence copy in `CustomEvidenceTests`, the ten-item `CustomAnalysisRegressionTests` checklist, and compact Groq JSON mapping onto the two panels.
 
 Two structural tests parse `mvp/streamlit_app.py` rather than run it: one asserts every analyse-form input has an explicit key that `restore_custom_form` writes, the other that the page seeds form state before building any widget and never calls restore mid-render. Further tests pin the prototype callout copy, the required/optional field labels, that **Load an example item** sits outside the form while **Analyse this item** remains the submit, and that `load_example_analyse_form` writes widget keys without storing a submitted payload.
 
@@ -358,6 +360,7 @@ Two structural tests parse `mvp/streamlit_app.py` rather than run it: one assert
 - [x] No discounts in UI, rules, or prompt
 - [x] Sample/simulated data is labelled
 - [x] Analyse an Item states prototype testing mode; **Load an example item** prefills a hardcoded example without scraping or a live catalogue
+- [x] Live Groq uses compact JSON (`buy_or_wait` / short reasons / `info_to_check`) and `max_tokens=1500` so json_schema can finish; HTTP failure still falls back to labelled rules
 - [x] `python -m unittest tests.test_engines` covers the engines, the six deployment failures, and the ten custom-analysis regressions
 - [x] README covers local run and Streamlit Community Cloud
 - [x] No login, database, or notification backend

@@ -52,6 +52,7 @@ FIT_REVIEW_WORD_RE = re.compile(
 )
 
 GROQ_MODEL = "openai/gpt-oss-120b"
+GROQ_MAX_TOKENS = 1500
 DEBUG_MODE = False
 API_UNAVAILABLE_MESSAGE = (
     "Live analysis is temporarily unavailable. Please try again."
@@ -121,6 +122,14 @@ LIVE_RESULT_REQUIRED_KEYS = (
     "next_step",
     "decision_evidence_used",
 )
+GROQ_RESPONSE_KEYS = (
+    "fit_recommendation",
+    "fit_confidence",
+    "fit_reason",
+    "buy_or_wait",
+    "buy_wait_reason",
+    "info_to_check",
+)
 
 
 class GroqAPIError(Exception):
@@ -140,46 +149,46 @@ LIVE_DECISION_STATUSES = (
 )
 
 # Strict JSON-schema mode requires every property to be listed in "required".
+# Compact on purpose: long evidence arrays were truncating json_schema output.
 ANALYSIS_SCHEMA = {
     "type": "object",
     "properties": {
         "fit_recommendation": {"type": "string"},
         "fit_confidence": {"type": "string", "enum": ["High", "Medium", "Low"]},
         "fit_reason": {"type": "string"},
-        "fit_evidence_used": {"type": "array", "items": {"type": "string"}},
-        "decision_status": {"type": "string", "enum": list(LIVE_DECISION_STATUSES)},
-        "decision_reason": {"type": "string"},
-        "next_step": {"type": "string"},
-        "decision_evidence_used": {"type": "array", "items": {"type": "string"}},
-        "info_to_check": {"type": "array", "items": {"type": "string"}},
+        "buy_or_wait": {"type": "string", "enum": list(LIVE_DECISION_STATUSES)},
+        "buy_wait_reason": {"type": "string"},
+        "info_to_check": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 3,
+        },
     },
-    "required": [*LIVE_RESULT_REQUIRED_KEYS, "info_to_check"],
+    "required": list(GROQ_RESPONSE_KEYS),
     "additionalProperties": False,
 }
 
 SYSTEM_PROMPT = """You are a wishlist decision assistant. The shopper already saved this item.
 
-Use ONLY these supplied fields: size chart, measurements, reviews, save reason, intended use, occasion timing, comparison status, and unresolved questions. Optional stock notes, if present, are the user's own words — not live inventory.
+Use ONLY supplied fields: size chart, measurements, reviews, save reason, intended use, occasion timing, comparison status, and unresolved questions. Optional stock notes, if present, are the user's own words — not live inventory.
 
 Rules:
 - Never invent a blocker that the user did not state.
 - Never claim the user is price-watching unless they explicitly say they are watching price or waiting for a cheaper price.
 - Never invent scarcity. Never treat stock notes as live inventory or as the sole reason to buy.
 - Never recommend a discount, coupon, markdown, or waiting for a sale.
-- If evidence is insufficient to recommend a size or a next action, set decision_status to "Needs more information".
+- If evidence is insufficient to recommend a size or a next action, set buy_or_wait to "Needs more information".
 - Do not ask the shopper to add a size chart, reviews, or measurements when those fields are already supplied (not "(not provided)").
-- In fit_reason and decision_reason, explain which supplied evidence informed the recommendation. List those items in fit_evidence_used and decision_evidence_used.
+- Keep every field concise; respond with ONLY the JSON object, no prose.
 
 Respond with ONLY valid JSON — no markdown, no code fences, no extra text. Exact schema:
 {
   "fit_recommendation": "string",
   "fit_confidence": "High | Medium | Low",
-  "fit_reason": "string",
-  "fit_evidence_used": ["string"],
-  "decision_status": "Ready to buy | Check one thing first | Compare first | Worth waiting | Reconsider this save | Needs more information",
-  "decision_reason": "string",
-  "next_step": "string",
-  "decision_evidence_used": ["string"]
+  "fit_reason": "<=25 words",
+  "buy_or_wait": "Ready to buy | Check one thing first | Compare first | Worth waiting | Reconsider this save | Needs more information",
+  "buy_wait_reason": "<=25 words",
+  "info_to_check": ["max 3 short items"]
 }
 """
 
@@ -1013,7 +1022,8 @@ def _build_live_user_prompt(payload: dict) -> str:
     lines = [
         "Advise on this wishlisted fashion item using only the fields below.",
         "If a field is (not provided), do not invent it.",
-        "If evidence is insufficient, use decision_status \"Needs more information\".",
+        "If evidence is insufficient, set buy_or_wait to \"Needs more information\".",
+        "Keep every field concise; respond with ONLY the JSON object, no prose.",
         "Return ONLY a JSON object. No markdown, no code fences, no extra text.",
         "",
     ]
@@ -1268,6 +1278,11 @@ def _map_fit_confidence(raw) -> str:
     return {"high": "High", "medium": "Medium", "low": "Low"}.get(_norm(_safe_str(raw)), "")
 
 
+def _uses_compact_live_schema(parsed: dict) -> bool:
+    """True when the model returned the compact Groq JSON contract."""
+    return "buy_or_wait" in parsed and "decision_status" not in parsed
+
+
 def validate_live_schema(parsed) -> list[str]:
     """Return schema errors. Does not coerce unknown statuses into Needs more information."""
     if not isinstance(parsed, dict):
@@ -1275,6 +1290,28 @@ def validate_live_schema(parsed) -> list[str]:
     if not parsed or parsed.get("_parse_failed"):
         return ["Response JSON object is empty or unreadable"]
     errors: list[str] = []
+    if _uses_compact_live_schema(parsed):
+        for key in GROQ_RESPONSE_KEYS:
+            if key not in parsed:
+                errors.append(f"Missing field: {key}")
+        if "fit_confidence" in parsed and not _map_fit_confidence(
+            parsed.get("fit_confidence")
+        ):
+            errors.append("Invalid fit_confidence")
+        if "buy_or_wait" in parsed:
+            mapped = _map_decision_status(_safe_str(parsed.get("buy_or_wait")))
+            if not mapped or mapped not in VERDICT_STYLES:
+                errors.append("Invalid buy_or_wait")
+        if (
+            "info_to_check" in parsed
+            and parsed["info_to_check"] is not None
+            and not isinstance(parsed["info_to_check"], (str, list, tuple))
+        ):
+            errors.append("Invalid info_to_check")
+        for key in ("fit_reason", "buy_wait_reason"):
+            if key in parsed and isinstance(parsed.get(key), dict):
+                errors.append(f"Invalid {key}")
+        return errors
     for key in LIVE_RESULT_REQUIRED_KEYS:
         if key not in parsed:
             errors.append(f"Missing field: {key}")
@@ -1312,7 +1349,7 @@ def call_groq(payload: dict, api_key: str) -> dict:
                 {"role": "user", "content": _build_live_user_prompt(payload)},
             ],
             temperature=0.2,
-            max_tokens=700,
+            max_tokens=GROQ_MAX_TOKENS,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -1328,6 +1365,14 @@ def call_groq(payload: dict, api_key: str) -> dict:
         raise
     except Exception as exc:
         _log_adapter_error("Groq API request failed", exc)
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        body = getattr(response, "text", None)
+        detail = repr(exc)
+        if status is not None or body:
+            detail = f"{detail} status={status} body={body}"
+        logger.error("Groq API request failed: %s", detail)
+        print(f"Groq API request failed: {detail}", flush=True)
         raise GroqAPIError("Groq API request failed") from None
 
     try:
@@ -1485,15 +1530,28 @@ def normalize_live_result(parsed: dict) -> dict:
         raise GroqParseError("schema validation failed")
     try:
         conf = _map_fit_confidence(parsed.get("fit_confidence"))
-        status = _map_decision_status(_safe_str(parsed.get("decision_status")))
+        status = _map_decision_status(
+            _safe_str(parsed.get("decision_status") or parsed.get("buy_or_wait"))
+        )
         fit_ev = _safe_str_list(parsed.get("fit_evidence_used"))
         dec_ev = _safe_str_list(
             parsed.get("decision_evidence_used") or parsed.get("evidence_used")
         )
+        info = _safe_str_list(parsed.get("info_to_check"))[:3]
         if not fit_ev:
             fit_ev = ["No fit evidence listed by the model"]
         if not dec_ev:
-            dec_ev = ["No decision evidence listed by the model"]
+            dec_ev = list(info) if info else ["No decision evidence listed by the model"]
+        next_from_model = parsed.get("next_step")
+        if next_from_model not in (None, ""):
+            next_step = _safe_str(next_from_model)
+        elif info:
+            next_step = "; ".join(info)
+        else:
+            next_step = _safe_str(
+                parsed.get("buy_wait_reason"),
+                "Review the fit and decision panels, then decide.",
+            )
 
         return {
             "fit_recommendation": _safe_str(parsed.get("fit_recommendation"), "—") or "—",
@@ -1505,13 +1563,10 @@ def normalize_live_result(parsed: dict) -> dict:
             "fit_evidence_used": fit_ev,
             "decision_status": status,
             "decision_reason": _safe_str(
-                parsed.get("decision_reason"),
+                parsed.get("decision_reason") or parsed.get("buy_wait_reason"),
                 "No decision reason returned from the supplied fields.",
             ),
-            "next_step": _safe_str(
-                parsed.get("next_step"),
-                "Add more of the supplied fields and try again.",
-            ),
+            "next_step": next_step,
             "decision_evidence_used": dec_ev,
             "evidence_used": dec_ev,
             "name": "Your item",

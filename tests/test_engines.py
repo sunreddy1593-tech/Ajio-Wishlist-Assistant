@@ -750,8 +750,10 @@ class CustomAnalysisRegressionTests(unittest.TestCase):
         schema = app.ANALYSIS_SCHEMA
         self.assertIs(schema["additionalProperties"], False)
         self.assertEqual(sorted(schema["required"]), sorted(schema["properties"]))
-        for key in app.LIVE_RESULT_REQUIRED_KEYS:
+        for key in app.GROQ_RESPONSE_KEYS:
             self.assertIn(key, schema["required"])
+        self.assertNotIn("fit_evidence_used", schema["properties"])
+        self.assertNotIn("decision_evidence_used", schema["properties"])
 
         groq_module = _groq_module_returning(_VALID_GROQ)
         with patch.dict(sys.modules, {"groq": groq_module}):
@@ -771,6 +773,25 @@ class CustomAnalysisRegressionTests(unittest.TestCase):
         self.assertFalse(result["is_rule_fallback"])
         self.assertEqual(result["fit_recommendation"], "M")
         self.assertEqual(result["decision_status"], "Ready to buy")
+
+    def test_02b_compact_groq_json_maps_onto_the_two_panels(self) -> None:
+        compact = {
+            "fit_recommendation": "M",
+            "fit_confidence": "High",
+            "fit_reason": "Chart and chest 40 agree on M.",
+            "buy_or_wait": "Ready to buy",
+            "buy_wait_reason": "Occasion in seven days and fit is clear.",
+            "info_to_check": ["Buy the suggested size."],
+        }
+        self.assertEqual(app.validate_live_schema(dict(compact)), [])
+        groq_module = _groq_module_returning(compact)
+        with patch.dict(sys.modules, {"groq": groq_module}):
+            result = app.analyse_custom_item(_full_custom_payload(), "gsk-test")
+        self.assertIsNone(result.get("failure_kind"))
+        self.assertTrue(result["is_live"])
+        self.assertEqual(result["decision_status"], "Ready to buy")
+        self.assertEqual(result["decision_reason"], compact["buy_wait_reason"])
+        self.assertEqual(result["next_step"], "Buy the suggested size.")
 
     def test_03_missing_response_fields_produce_processing_error(self) -> None:
         for dropped in ("next_step", "fit_reason", "decision_evidence_used"):
@@ -956,18 +977,20 @@ class GroqAdapterTests(unittest.TestCase):
         for key in app.CUSTOM_PAYLOAD_FIELDS:
             self.assertIn(app.CUSTOM_PAYLOAD_FIELD_LABELS[key] + ":", prompt)
         self.assertIn("only valid json", app.SYSTEM_PROMPT.lower())
+        self.assertIn("keep every field concise", app.SYSTEM_PROMPT.lower())
 
     def test_call_requests_strict_structured_output(self) -> None:
         schema = app.ANALYSIS_SCHEMA
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(
-            schema["properties"]["decision_status"]["enum"],
+            schema["properties"]["buy_or_wait"]["enum"],
             list(app.LIVE_DECISION_STATUSES),
         )
         self.assertEqual(
             schema["properties"]["fit_confidence"]["enum"], ["High", "Medium", "Low"]
         )
-        for key in app.LIVE_RESULT_REQUIRED_KEYS:
+        self.assertEqual(schema["properties"]["info_to_check"].get("maxItems"), 3)
+        for key in app.GROQ_RESPONSE_KEYS:
             self.assertIn(key, schema["properties"])
             self.assertIn(key, schema["required"])
         self.assertEqual(sorted(schema["required"]), sorted(schema["properties"]))
@@ -995,7 +1018,8 @@ class GroqAdapterTests(unittest.TestCase):
         self.assertEqual(parsed["decision_status"], "Ready to buy")
         self.assertEqual(captured["model"], app.GROQ_MODEL)
         self.assertEqual(captured["temperature"], 0.2)
-        self.assertEqual(captured["max_tokens"], 700)
+        self.assertEqual(captured["max_tokens"], app.GROQ_MAX_TOKENS)
+        self.assertGreaterEqual(captured["max_tokens"], 1024)
         self.assertNotIn("stream", captured)
         self.assertNotIn("tools", captured)
         response_format = captured["response_format"]
@@ -1044,6 +1068,36 @@ class GroqAdapterTests(unittest.TestCase):
         self.assertTrue(records)
         self.assertNotIn("gsk-leaked", " ".join(records))
         self.assertNotIn("gsk", " ".join(records).lower())
+
+    def test_call_groq_logs_original_http_error_before_reraising(self) -> None:
+        records: list[str] = []
+
+        def capture(fmt, *args, **kwargs):
+            records.append(fmt % args if args else str(fmt))
+
+        class _FailingCompletions:
+            def create(self, **kwargs):
+                err = RuntimeError("Error code: 400 - failed_generation")
+                err.response = MagicMock()
+                err.response.status_code = 400
+                err.response.text = '{"error":{"message":"Failed to generate JSON"}}'
+                raise err
+
+        client = MagicMock()
+        client.chat.completions = _FailingCompletions()
+        groq_module = MagicMock()
+        groq_module.Groq = MagicMock(return_value=client)
+        with patch.dict(sys.modules, {"groq": groq_module}):
+            with patch.object(app.logger, "error", side_effect=capture):
+                with self.assertRaises(app.GroqAPIError) as raised:
+                    app.call_groq(_full_custom_payload(), "gsk-test")
+
+        self.assertEqual(str(raised.exception), "Groq API request failed")
+        self.assertIsNone(raised.exception.__cause__)
+        blob = " ".join(records)
+        self.assertIn("400", blob)
+        self.assertIn("Failed to generate JSON", blob)
+        self.assertNotIn("gsk-test", blob)
 
 
 class RuleFallbackTests(unittest.TestCase):
